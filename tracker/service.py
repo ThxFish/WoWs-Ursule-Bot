@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
@@ -117,6 +118,15 @@ async def sync_all(db: Session) -> DailySnapshot:
     db.commit()
     db.refresh(snapshot)
     return snapshot
+
+
+SYNC_LOCK = asyncio.Lock()
+
+
+async def guarded_sync(db: Session) -> DailySnapshot:
+    """Serialize scheduled, web, and QQ-triggered collection runs."""
+    async with SYNC_LOCK:
+        return await sync_all(db)
 
 
 def dashboard_context(db: Session) -> dict:

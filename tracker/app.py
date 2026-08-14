@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
 import zipfile
@@ -21,10 +22,10 @@ from .config import config
 from .backup import create_backup, list_backups, prune_automatic_backups, restore_backup
 from .db import SessionLocal, get_db, init_db
 from .models import DailySnapshot, ManualOverride, ResourceForecast, ResetPlan, RewardGoal, utcnow
-from .notifications import notify_with_fallback
+from .notifications import DEFAULT_QQ_MESSAGE_TEMPLATE, notify_with_fallback, render_message_template
 from .planner import BRITISH_LIGHT_CRUISER_LINE, EVENT_DEADLINE, LINE_XP_PER_RESET, build_regrind_baseline, reset_count
 from .security import csrf_valid, hash_password, new_session, read_session, verify_password
-from .service import dashboard_context, report_text, sync_all
+from .service import dashboard_context, guarded_sync, report_text
 from .settings import get_setting, has_setup, set_setting
 from .wargaming import build_login_url
 
@@ -37,7 +38,7 @@ scheduler = AsyncIOScheduler(timezone=config.timezone)
 
 async def scheduled_sync() -> None:
     with SessionLocal() as db:
-        await sync_all(db)
+        await guarded_sync(db)
         try:
             backup_path = create_backup("auto")
             prune_automatic_backups(keep=30)
@@ -78,15 +79,23 @@ async def lifespan(app: FastAPI):
     if not scheduler.running:
         scheduler.add_job(scheduled_sync, "cron", hour=config.sync_hour, minute=config.sync_minute, id="daily-sync", replace_existing=True, coalesce=True, max_instances=1)
         scheduler.start()
+    from .qq_listener import start_listener
+    qq_runtime = await start_listener()
     with SessionLocal() as db:
         if has_setup(db):
             today = datetime.now().date()
             if not db.scalar(select(DailySnapshot).where(DailySnapshot.snapshot_date == today)):
-                import asyncio
                 asyncio.create_task(scheduled_sync())
-    yield
-    if scheduler.running:
-        scheduler.shutdown(wait=False)
+    try:
+        yield
+    finally:
+        if qq_runtime:
+            qq_client, qq_task = qq_runtime
+            await qq_client.close()
+            qq_task.cancel()
+            await asyncio.gather(qq_task, return_exceptions=True)
+        if scheduler.running:
+            scheduler.shutdown(wait=False)
 
 
 app = FastAPI(title="WoWS Marathon Tracker", version="0.1.0", lifespan=lifespan)
@@ -303,7 +312,7 @@ def history_page(request: Request, db: Session = Depends(get_db)):
 @app.post("/api/snapshots/capture")
 async def capture_snapshot(request: Request, csrf: str = Form(...), db: Session = Depends(get_db)):
     require_csrf(request, csrf)
-    await sync_all(db)
+    await guarded_sync(db)
     return RedirectResponse("/history?captured=1", status_code=303)
 
 
@@ -385,8 +394,12 @@ async def edit_snapshot(snapshot_id: int, request: Request, db: Session = Depend
 
 @app.get("/settings", response_class=HTMLResponse)
 def settings_page(request: Request, db: Session = Depends(get_db)):
-    keys = ["account_id", "committed_coal", "committed_steel", "committed_research_points", "daily_token_target", "qq_app_id", "qq_target_id", "qq_target_type", "smtp_host", "smtp_port", "smtp_username", "smtp_recipient"]
+    keys = ["account_id", "committed_coal", "committed_steel", "committed_research_points", "daily_token_target", "qq_app_id", "qq_user_openid", "qq_group_openid", "qq_message_template", "qq_daily_target", "qq_target_id", "qq_target_type", "smtp_host", "smtp_port", "smtp_username", "smtp_recipient"]
     values = {key: get_setting(db, key) for key in keys}
+    if not values["qq_user_openid"] and not values["qq_group_openid"] and values["qq_target_id"]:
+        values["qq_group_openid" if values["qq_target_type"] == "group" else "qq_user_openid"] = values["qq_target_id"]
+    values["qq_message_template"] = values["qq_message_template"] or DEFAULT_QQ_MESSAGE_TEMPLATE
+    values["qq_daily_target"] = values["qq_daily_target"] or values["qq_target_type"] or "user"
     backups = [{"name": path.name, "size": path.stat().st_size, "modified": datetime.fromtimestamp(path.stat().st_mtime, ZoneInfo(config.timezone))} for path in list_backups(limit=10)]
     backup_status = {"at": get_setting(db, "last_backup_at"), "file": get_setting(db, "last_backup_file"), "error": get_setting(db, "last_backup_error")}
     return templates.TemplateResponse("settings.html", page_context(request, values=values, auth_state=(config.data_dir / "auth" / "armory-storage.json").exists(), backups=backups, backup_status=backup_status))
@@ -425,9 +438,17 @@ async def save_settings(request: Request, db: Session = Depends(get_db)):
     form = await request.form()
     require_csrf(request, str(form.get("csrf", "")))
     secrets = {"wg_application_id", "qq_app_secret", "smtp_password"}
-    allowed = {"account_id", "wg_application_id", "committed_coal", "committed_steel", "committed_research_points", "daily_token_target", "qq_app_id", "qq_app_secret", "qq_target_id", "qq_target_type", "smtp_host", "smtp_port", "smtp_username", "smtp_password", "smtp_recipient"}
+    allowed = {"account_id", "wg_application_id", "committed_coal", "committed_steel", "committed_research_points", "daily_token_target", "qq_app_id", "qq_app_secret", "qq_user_openid", "qq_group_openid", "qq_message_template", "qq_daily_target", "smtp_host", "smtp_port", "smtp_username", "smtp_password", "smtp_recipient"}
+    clearable = {"qq_user_openid", "qq_group_openid", "qq_message_template"}
+    if "qq_message_template" in form:
+        try:
+            render_message_template(str(form["qq_message_template"]), "测试标题", "测试日报")
+        except RuntimeError as exc:
+            raise HTTPException(400, str(exc))
+    if "qq_daily_target" in form and str(form["qq_daily_target"]) not in {"user", "group", "both"}:
+        raise HTTPException(400, "未知 QQ 每日通知目标")
     for key in allowed:
-        if key in form and str(form[key]).strip():
+        if key in form and (str(form[key]).strip() or key in clearable):
             set_setting(db, key, str(form[key]).strip(), secret=key in secrets)
     db.commit()
     return RedirectResponse("/settings", status_code=303)
@@ -453,7 +474,7 @@ async def import_armory_state(request: Request, csrf: str = Form(...), state_fil
 @app.post("/api/sync")
 async def manual_sync(request: Request, csrf: str = Form(...), db: Session = Depends(get_db)):
     require_csrf(request, csrf)
-    await sync_all(db)
+    await guarded_sync(db)
     return RedirectResponse("/", status_code=303)
 
 
@@ -477,6 +498,18 @@ async def notification_test(request: Request, csrf: str = Form(...), db: Session
     try:
         channel = await notify_with_fallback(db, "WoWS Tracker 测试", "WoWS Tracker 通知测试成功。")
         return RedirectResponse(f"/settings?notice={channel}", status_code=303)
+    except Exception as exc:
+        raise HTTPException(502, str(exc))
+
+
+@app.post("/api/notify/test/{target}")
+async def notification_target_test(target: str, request: Request, csrf: str = Form(...), db: Session = Depends(get_db)):
+    require_csrf(request, csrf)
+    if target not in {"user", "group"}:
+        raise HTTPException(400, "未知 QQ 测试目标")
+    try:
+        channel = await notify_with_fallback(db, "WoWS Tracker 测试", f"WoWS Tracker {'好友' if target == 'user' else '群聊'}通知测试成功。", qq_target=target)
+        return RedirectResponse(f"/settings?notice={channel}&target={target}", status_code=303)
     except Exception as exc:
         raise HTTPException(502, str(exc))
 
