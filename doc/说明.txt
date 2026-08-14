@@ -1,0 +1,9 @@
+军械库网址
+https://armory.worldofwarships.eu/zh-sg/
+其中的inventory字段包含了玩家所拥有的资源、代币、加成卡等信息
+
+活动介绍
+https://worldofwarships.eu/zh-sg/news/general-news/holiday-convoy-six-months-of-rewards/
+
+战舰世界API文档
+https://recent.wows.shinoaki.com:8890/v3/swagger-ui/index.html

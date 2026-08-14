@@ -1,0 +1,10 @@
+{% extends "base.html" %}{% block title %}重爬时间轴{% endblock %}{% block content %}
+<div class="page-title"><p class="eyebrow">RESEARCH BUREAU</p><h1>固定线路时间轴</h1></div>
+<section class="panel"><h2>生成新基线</h2><p class="muted">截止日期统一为 2027-02-01。每行填写“舰船名:到达该船所需经验:ship_id（可选）”。保存后基线不会因落后自动改变。</p><form method="post" action="/api/plan" class="form-grid"><input type="hidden" name="csrf" value="{{ csrf }}"><label>线路名称<input name="line_name" value="{{ plan.line_name if plan else '' }}" required></label><label>研发点倍率<input name="multiplier" type="number" min="1" value="{{ plan.multiplier if plan else 1 }}"></label><label>当前舰船序号（从 0 开始）<input name="current_ship_index" type="number" min="0" value="{{ plan.current_ship_index if plan else 0 }}"></label><label class="wide">舰船列表<textarea name="ships" rows="8" required>{% if plan %}{% for ship in plan.ships_json|safe|from_json %}{{ ship.name }}:{{ ship.xp }}:{{ ship.ship_id or '' }}
+{% endfor %}{% else %}V级舰船:20000:
+VI级舰船:40000:
+VII级舰船:70000:
+VIII级舰船:110000:
+IX级舰船:160000:
+X级舰船:240000:{% endif %}</textarea></label><button>生成并冻结基线</button></form></section>
+<section class="panel"><div class="panel-head"><h2>{{ plan.line_name if plan else '尚未配置' }}</h2><span>{{ plan.deadline if plan else '' }}</span></div><div class="timeline">{% for item in baseline %}<div class="timeline-item"><time>{{ item.date }}</time><i></i><div><b>{{ item.ship }}</b><small>累计目标经验 {{ item.target_xp }}</small></div></div>{% else %}<p class="empty">保存线路后显示逐日目标。</p>{% endfor %}</div></section>{% endblock %}
