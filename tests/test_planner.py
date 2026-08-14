@@ -1,6 +1,17 @@
 from datetime import date
 
-from tracker.planner import ShipStep, build_baseline, exchange_tokens, milestone_status, recurring_occurrences, reset_count, token_plan
+from tracker.planner import (
+    LINE_XP_PER_RESET,
+    ShipStep,
+    build_baseline,
+    build_regrind_baseline,
+    exchange_tokens,
+    milestone_status,
+    recurring_occurrences,
+    reset_count,
+    token_plan,
+    update_line_state,
+)
 
 
 def test_exchange_blocks_and_coal_cap():
@@ -44,3 +55,37 @@ def test_recurring_resource_occurrences():
     assert recurring_occurrences(date(2027, 1, 1), deadline, "weekly") == 5
     assert recurring_occurrences(date(2026, 11, 30), deadline, "monthly") == 3
     assert recurring_occurrences(date(2027, 2, 2), deadline, "daily") == 0
+
+
+def test_fixed_line_xp_and_even_daily_baseline():
+    assert LINE_XP_PER_RESET == 689_500
+    baseline = build_regrind_baseline(date(2027, 1, 29), date(2027, 2, 1), 2)
+    assert len(baseline) == 4
+    assert baseline[0]["daily_xp"] == 344_750
+    assert baseline[-1]["target_xp"] == 1_379_000
+    assert baseline[-1]["ship"] == "米诺陶可研发并重置"
+
+
+def test_port_transitions_advance_ship_and_finish_cycle():
+    leander, fiji, _, neptune, minotaur = [4183734224, 4182685648, 4181637072, 4180588496, 4179539920]
+    reset = update_line_state([minotaur], [leander], 0, 4, True)
+    assert reset["waiting_for_reset"] is False
+    assert reset["current_ship_index"] == 0
+    advanced = update_line_state([leander], [fiji], 0, 0, False)
+    assert advanced["current_ship_index"] == 1
+    complete = update_line_state([neptune], [leander], 0, 3, False)
+    assert complete["completed_cycles"] == 1
+    assert complete["waiting_for_reset"] is False
+    assert complete["current_ship_index"] == 0
+
+
+def test_missing_private_port_never_changes_progress():
+    state = update_line_state([4183734224], None, 2, 1, False)
+    assert state == {"completed_cycles": 2, "current_ship_index": 1, "waiting_for_reset": False, "event": ""}
+
+
+def test_repeated_same_day_port_state_is_idempotent():
+    leander = 4183734224
+    state = update_line_state([leander], [leander], 1, 0, False)
+    assert state["completed_cycles"] == 1
+    assert state["current_ship_index"] == 0

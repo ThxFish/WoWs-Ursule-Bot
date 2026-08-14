@@ -154,6 +154,24 @@ async def collect_wargaming(application_id: str, account_id: str, access_token: 
         response = await client.get("https://api.worldofwarships.eu/wows/ships/stats/", params=params)
         response.raise_for_status()
         payload = response.json()
+        port_ships = None
+        if access_token:
+            private_response = await client.get(
+                "https://api.worldofwarships.eu/wows/account/info/",
+                params={
+                    "application_id": application_id,
+                    "account_id": account_id,
+                    "access_token": access_token,
+                    "extra": "private.port",
+                    "fields": "private.port",
+                },
+            )
+            private_response.raise_for_status()
+            private_payload = private_response.json()
+            private_row = (private_payload.get("data") or {}).get(str(account_id)) or {}
+            private_data = private_row.get("private")
+            if isinstance(private_data, dict) and isinstance(private_data.get("port"), list):
+                port_ships = [int(ship_id) for ship_id in private_data["port"]]
     if payload.get("status") != "ok":
         raise CollectionError(str(payload.get("error", "Wargaming API 返回错误")))
     rows = payload.get("data", {}).get(str(account_id)) or []
@@ -161,6 +179,7 @@ async def collect_wargaming(application_id: str, account_id: str, access_token: 
         "ships": [{"ship_id": row.get("ship_id"), "last_battle_time": row.get("last_battle_time")} for row in rows],
         "battles": sum(int((row.get("pvp") or {}).get("battles") or 0) for row in rows),
         "xp": sum(int((row.get("pvp") or {}).get("xp") or 0) for row in rows),
+        "port_ships": port_ships,
     }
 
 

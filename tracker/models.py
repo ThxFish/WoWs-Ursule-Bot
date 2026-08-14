@@ -48,6 +48,9 @@ class ResetPlan(Base):
     multiplier: Mapped[int] = mapped_column(Integer, default=1)
     deadline: Mapped[date] = mapped_column(Date)
     current_ship_index: Mapped[int] = mapped_column(Integer, default=0)
+    target_resets: Mapped[int] = mapped_column(Integer, default=0)
+    completed_cycles: Mapped[int] = mapped_column(Integer, default=0)
+    waiting_for_reset: Mapped[bool] = mapped_column(Boolean, default=True)
     ships_json: Mapped[str] = mapped_column(Text, default="[]")
     baseline_json: Mapped[str] = mapped_column(Text, default="[]")
     active: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -72,6 +75,8 @@ class DailySnapshot(Base):
     xp_total: Mapped[int | None] = mapped_column(Integer, nullable=True)
     boosters_json: Mapped[str] = mapped_column(Text, default="{}")
     ships_json: Mapped[str] = mapped_column(Text, default="[]")
+    port_ships_json: Mapped[str] = mapped_column(Text, nullable=True)
+    line_state_json: Mapped[str] = mapped_column(Text, default="{}")
     source_status_json: Mapped[str] = mapped_column(Text, default="{}")
     collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 

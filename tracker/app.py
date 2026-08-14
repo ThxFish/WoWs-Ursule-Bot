@@ -1,23 +1,28 @@
 from __future__ import annotations
 
 import json
+import tempfile
+import zipfile
 from contextlib import asynccontextmanager
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import Depends, FastAPI, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .config import config
+from .backup import create_backup, list_backups, prune_automatic_backups, restore_backup
 from .db import SessionLocal, get_db, init_db
-from .models import DailySnapshot, ManualOverride, ResourceForecast, ResetPlan, RewardGoal
+from .models import DailySnapshot, ManualOverride, ResourceForecast, ResetPlan, RewardGoal, utcnow
 from .notifications import notify_with_fallback
-from .planner import EVENT_DEADLINE, build_baseline, parse_ship_steps
+from .planner import BRITISH_LIGHT_CRUISER_LINE, EVENT_DEADLINE, LINE_XP_PER_RESET, build_regrind_baseline, reset_count
 from .security import csrf_valid, hash_password, new_session, read_session, verify_password
 from .service import dashboard_context, report_text, sync_all
 from .settings import get_setting, has_setup, set_setting
@@ -26,12 +31,23 @@ from .wargaming import build_login_url
 ROOT = Path(__file__).parent
 templates = Jinja2Templates(directory=str(ROOT / "templates"))
 templates.env.filters["from_json"] = lambda value: json.loads(value or "[]")
+templates.env.filters["datetime_local"] = lambda value: (value.replace(tzinfo=timezone.utc) if value and value.tzinfo is None else value).astimezone(ZoneInfo(config.timezone)).strftime("%Y-%m-%dT%H:%M") if value else ""
 scheduler = AsyncIOScheduler(timezone=config.timezone)
 
 
 async def scheduled_sync() -> None:
     with SessionLocal() as db:
         await sync_all(db)
+        try:
+            backup_path = create_backup("auto")
+            prune_automatic_backups(keep=30)
+            set_setting(db, "last_backup_at", utcnow().isoformat())
+            set_setting(db, "last_backup_file", backup_path.name)
+            set_setting(db, "last_backup_error", "")
+            db.commit()
+        except Exception as exc:
+            set_setting(db, "last_backup_error", str(exc)[:500])
+            db.commit()
         try:
             await notify_with_fallback(db, "战舰世界节日船团日报", report_text(db))
         except Exception:
@@ -43,13 +59,22 @@ async def lifespan(app: FastAPI):
     init_db()
     with SessionLocal() as db:
         for plan in db.scalars(select(ResetPlan)):
-            baseline = json.loads(plan.baseline_json or "[]")
-            if not baseline or baseline[-1].get("date") != EVENT_DEADLINE.isoformat():
-                start = plan.created_at.date() if plan.created_at else date.today()
-                plan.baseline_json = json.dumps(build_baseline(start, EVENT_DEADLINE, parse_ship_steps(plan.ships_json), plan.current_ship_index), ensure_ascii=False)
-                plan.deadline = EVENT_DEADLINE
-                db.add(plan)
+            plan.deadline = EVENT_DEADLINE
+            db.add(plan)
         db.commit()
+        active_plan = db.scalar(select(ResetPlan).where(ResetPlan.active.is_(True)).order_by(ResetPlan.id.desc()).limit(1))
+        if active_plan and active_plan.line_name != "英国轻巡：利安得 → 米诺陶":
+            projection = dashboard_context(db)["projection"]
+            target_resets = reset_count(projection["additional_research_points"], multiplier=active_plan.multiplier)
+            active_plan.line_name = "英国轻巡：利安得 → 米诺陶"
+            active_plan.target_resets = target_resets
+            active_plan.completed_cycles = 0
+            active_plan.current_ship_index = 4
+            active_plan.waiting_for_reset = True
+            active_plan.ships_json = json.dumps(list(BRITISH_LIGHT_CRUISER_LINE), ensure_ascii=False)
+            active_plan.baseline_json = json.dumps(build_regrind_baseline(date.today(), EVENT_DEADLINE, target_resets), ensure_ascii=False)
+            db.add(active_plan)
+            db.commit()
     if not scheduler.running:
         scheduler.add_job(scheduled_sync, "cron", hour=config.sync_hour, minute=config.sync_minute, id="daily-sync", replace_existing=True, coalesce=True, max_instances=1)
         scheduler.start()
@@ -215,25 +240,40 @@ def save_resource_allocation(request: Request, csrf: str = Form(...), coal: int 
 def plan_page(request: Request, db: Session = Depends(get_db)):
     plan = db.scalar(select(ResetPlan).where(ResetPlan.active.is_(True)).order_by(ResetPlan.id.desc()).limit(1))
     baseline = json.loads(plan.baseline_json) if plan else []
-    return templates.TemplateResponse("plan.html", page_context(request, plan=plan, baseline=baseline))
+    milestones = []
+    previous_key = None
+    for item in baseline:
+        key = (item.get("cycle"), item.get("ship"))
+        if key != previous_key:
+            milestones.append(item)
+            previous_key = key
+    context = dashboard_context(db)
+    return templates.TemplateResponse(
+        "plan.html",
+        page_context(request, plan=plan, baseline=baseline, milestones=milestones, latest=context["latest"], projection=context["projection"], line=BRITISH_LIGHT_CRUISER_LINE, line_xp=LINE_XP_PER_RESET),
+    )
 
 
 @app.post("/api/plan")
-def save_plan(request: Request, csrf: str = Form(...), line_name: str = Form(...), multiplier: int = Form(1), current_ship_index: int = Form(0), ships: str = Form(...), db: Session = Depends(get_db)):
+def save_plan(request: Request, csrf: str = Form(...), multiplier: int = Form(1), db: Session = Depends(get_db)):
     require_csrf(request, csrf)
-    parsed = []
-    for line in ships.splitlines():
-        if not line.strip():
-            continue
-        parts = [part.strip() for part in line.split(":")]
-        parsed.append({"name": parts[0], "xp": int(parts[1]) if len(parts) > 1 else 0, "ship_id": int(parts[2]) if len(parts) > 2 and parts[2] else None})
-    steps = parse_ship_steps(parsed)
-    if not steps:
-        raise HTTPException(400, "至少填写一艘舰船")
+    multiplier = max(1, multiplier)
+    context = dashboard_context(db)
+    target_resets = reset_count(context["projection"]["additional_research_points"], multiplier=multiplier)
     for old in db.scalars(select(ResetPlan).where(ResetPlan.active.is_(True))):
         old.active = False
-    baseline = build_baseline(date.today(), EVENT_DEADLINE, steps, current_ship_index)
-    db.add(ResetPlan(line_name=line_name.strip(), multiplier=max(1, multiplier), deadline=EVENT_DEADLINE, current_ship_index=max(0, current_ship_index), ships_json=json.dumps(parsed, ensure_ascii=False), baseline_json=json.dumps(baseline, ensure_ascii=False)))
+    baseline = build_regrind_baseline(date.today(), EVENT_DEADLINE, target_resets)
+    db.add(ResetPlan(
+        line_name="英国轻巡：利安得 → 米诺陶",
+        multiplier=multiplier,
+        deadline=EVENT_DEADLINE,
+        current_ship_index=4,
+        target_resets=target_resets,
+        completed_cycles=0,
+        waiting_for_reset=True,
+        ships_json=json.dumps(list(BRITISH_LIGHT_CRUISER_LINE), ensure_ascii=False),
+        baseline_json=json.dumps(baseline, ensure_ascii=False),
+    ))
     db.commit()
     return RedirectResponse("/plan", status_code=303)
 
@@ -241,14 +281,143 @@ def save_plan(request: Request, csrf: str = Form(...), line_name: str = Form(...
 @app.get("/history", response_class=HTMLResponse)
 def history_page(request: Request, db: Session = Depends(get_db)):
     snapshots = list(db.scalars(select(DailySnapshot).order_by(DailySnapshot.snapshot_date.desc()).limit(90)))
-    return templates.TemplateResponse("history.html", page_context(request, snapshots=snapshots))
+    snapshot_views = []
+    line_ids = {int(ship["ship_id"]): ship["name"] for ship in BRITISH_LIGHT_CRUISER_LINE}
+    for snapshot in snapshots:
+        boosters = json.loads(snapshot.boosters_json or "{}")
+        state = json.loads(snapshot.line_state_json or "{}")
+        port = json.loads(snapshot.port_ships_json) if snapshot.port_ships_json else []
+        state_index = state.get("current_ship_index")
+        if state.get("waiting_for_reset"):
+            line_ship = "等待首次重置"
+        elif isinstance(state_index, int) and 0 <= state_index < len(BRITISH_LIGHT_CRUISER_LINE):
+            line_ship = BRITISH_LIGHT_CRUISER_LINE[state_index]["name"]
+        else:
+            owned = [line_ids[ship_id] for ship_id in port if ship_id in line_ids]
+            line_ship = "、".join(owned) if owned else "未记录"
+        snapshot_views.append({"row": snapshot, "boosters": boosters, "state": state, "line_ship": line_ship})
+    audits = list(db.scalars(select(ManualOverride).where(ManualOverride.field_name.like("snapshot.%")).order_by(ManualOverride.created_at.desc()).limit(50)))
+    return templates.TemplateResponse("history.html", page_context(request, snapshots=snapshot_views, audits=audits, line=BRITISH_LIGHT_CRUISER_LINE))
+
+
+@app.post("/api/snapshots/capture")
+async def capture_snapshot(request: Request, csrf: str = Form(...), db: Session = Depends(get_db)):
+    require_csrf(request, csrf)
+    await sync_all(db)
+    return RedirectResponse("/history?captured=1", status_code=303)
+
+
+@app.post("/api/snapshots/{snapshot_id}/edit")
+async def edit_snapshot(snapshot_id: int, request: Request, db: Session = Depends(get_db)):
+    form = await request.form()
+    require_csrf(request, str(form.get("csrf", "")))
+    snapshot = db.get(DailySnapshot, snapshot_id)
+    if not snapshot:
+        raise HTTPException(404, "快照不存在")
+    reason = str(form.get("reason", "")).strip()
+    if not reason:
+        raise HTTPException(400, "请填写修改原因")
+
+    integer_fields = (
+        "holiday_tokens", "credits", "gold", "coal", "steel", "research_points",
+        "community_tokens", "free_xp", "elite_commander_xp", "battles_total",
+    )
+    try:
+        parsed_integers = {field_name: (None if str(form.get(field_name, "")).strip() == "" else max(0, int(str(form.get(field_name, "")).strip()))) for field_name in integer_fields}
+        parsed_boosters = {booster_name: (None if str(form.get(booster_name, "")).strip() == "" else max(0, int(str(form.get(booster_name, "")).strip()))) for booster_name in ("rare_credits", "rare_ship_xp", "rare_commander_xp", "rare_free_xp")}
+        line_stage = int(str(form.get("line_stage", "-1")))
+        completed_cycles = max(0, int(str(form.get("completed_cycles", "0"))))
+    except ValueError:
+        raise HTTPException(400, "数值字段格式不正确")
+    for field_name in integer_fields:
+        new_value = parsed_integers[field_name]
+        if getattr(snapshot, field_name) != new_value:
+            setattr(snapshot, field_name, new_value)
+            db.add(ManualOverride(snapshot_date=snapshot.snapshot_date, field_name=f"snapshot.{snapshot.id}.{field_name}", value="" if new_value is None else str(new_value), reason=reason))
+
+    boosters = json.loads(snapshot.boosters_json or "{}")
+    for booster_name in ("rare_credits", "rare_ship_xp", "rare_commander_xp", "rare_free_xp"):
+        new_value = parsed_boosters[booster_name]
+        old_value = boosters.get(booster_name)
+        if old_value != new_value:
+            if new_value is None:
+                boosters.pop(booster_name, None)
+            else:
+                boosters[booster_name] = new_value
+            db.add(ManualOverride(snapshot_date=snapshot.snapshot_date, field_name=f"snapshot.{snapshot.id}.{booster_name}", value="" if new_value is None else str(new_value), reason=reason))
+    snapshot.boosters_json = json.dumps(boosters, ensure_ascii=False)
+
+    raw_time = str(form.get("collected_at", "")).strip()
+    if raw_time:
+        local_time = datetime.fromisoformat(raw_time)
+        if local_time.tzinfo is None:
+            local_time = local_time.replace(tzinfo=ZoneInfo(config.timezone))
+        new_time = local_time.astimezone(timezone.utc)
+        current_time = snapshot.collected_at
+        if current_time.tzinfo is None:
+            current_time = current_time.replace(tzinfo=timezone.utc)
+        if current_time != new_time:
+            snapshot.collected_at = new_time
+            db.add(ManualOverride(snapshot_date=snapshot.snapshot_date, field_name=f"snapshot.{snapshot.id}.collected_at", value=new_time.isoformat(), reason=reason))
+
+    state = json.loads(snapshot.line_state_json or "{}")
+    waiting = line_stage < 0
+    current_index = 4 if waiting else min(line_stage, 3)
+    if state.get("waiting_for_reset") != waiting or state.get("current_ship_index") != current_index or state.get("completed_cycles") != completed_cycles:
+        state.update({"waiting_for_reset": waiting, "current_ship_index": current_index, "completed_cycles": completed_cycles, "event": f"手工修正：{reason}"})
+        snapshot.line_state_json = json.dumps(state, ensure_ascii=False)
+        db.add(ManualOverride(snapshot_date=snapshot.snapshot_date, field_name=f"snapshot.{snapshot.id}.line_state", value=json.dumps(state, ensure_ascii=False), reason=reason))
+        latest_id = db.scalar(select(DailySnapshot.id).order_by(DailySnapshot.snapshot_date.desc()).limit(1))
+        active_plan = db.scalar(select(ResetPlan).where(ResetPlan.active.is_(True)).order_by(ResetPlan.id.desc()).limit(1))
+        if snapshot.id == latest_id and active_plan:
+            active_plan.waiting_for_reset = waiting
+            active_plan.current_ship_index = current_index
+            active_plan.completed_cycles = completed_cycles
+            db.add(active_plan)
+
+    statuses = json.loads(snapshot.source_status_json or "{}")
+    statuses["manual_edit"] = {"ok": True, "edited_at": utcnow().isoformat(), "reason": reason}
+    snapshot.source_status_json = json.dumps(statuses, ensure_ascii=False)
+    db.add(snapshot)
+    db.commit()
+    return RedirectResponse(f"/history?edited={snapshot.id}", status_code=303)
 
 
 @app.get("/settings", response_class=HTMLResponse)
 def settings_page(request: Request, db: Session = Depends(get_db)):
     keys = ["account_id", "committed_coal", "committed_steel", "committed_research_points", "daily_token_target", "qq_app_id", "qq_target_id", "qq_target_type", "smtp_host", "smtp_port", "smtp_username", "smtp_recipient"]
     values = {key: get_setting(db, key) for key in keys}
-    return templates.TemplateResponse("settings.html", page_context(request, values=values, auth_state=(config.data_dir / "auth" / "armory-storage.json").exists()))
+    backups = [{"name": path.name, "size": path.stat().st_size, "modified": datetime.fromtimestamp(path.stat().st_mtime, ZoneInfo(config.timezone))} for path in list_backups(limit=10)]
+    backup_status = {"at": get_setting(db, "last_backup_at"), "file": get_setting(db, "last_backup_file"), "error": get_setting(db, "last_backup_error")}
+    return templates.TemplateResponse("settings.html", page_context(request, values=values, auth_state=(config.data_dir / "auth" / "armory-storage.json").exists(), backups=backups, backup_status=backup_status))
+
+
+@app.post("/api/backup/export")
+def export_backup(request: Request, csrf: str = Form(...)):
+    require_csrf(request, csrf)
+    path = create_backup("manual")
+    return FileResponse(path, media_type="application/zip", filename=path.name)
+
+
+@app.post("/api/backup/import")
+async def import_backup(request: Request, csrf: str = Form(...), backup_file: UploadFile = None):
+    require_csrf(request, csrf)
+    if backup_file is None or not backup_file.filename:
+        raise HTTPException(400, "请选择备份 ZIP 文件")
+    raw = await backup_file.read(100 * 1024 * 1024 + 1)
+    if len(raw) > 100 * 1024 * 1024:
+        raise HTTPException(413, "备份文件不能超过 100MB")
+    with tempfile.TemporaryDirectory(prefix="wows-tracker-upload-") as temp_dir:
+        uploaded = Path(temp_dir) / "backup.zip"
+        uploaded.write_bytes(raw)
+        try:
+            from .db import engine
+            engine.dispose()
+            safety = restore_backup(uploaded)
+            init_db()
+        except (ValueError, zipfile.BadZipFile) as exc:
+            raise HTTPException(400, str(exc))
+    return RedirectResponse(f"/settings?restored=1&safety={safety.name}", status_code=303)
 
 
 @app.post("/api/settings")

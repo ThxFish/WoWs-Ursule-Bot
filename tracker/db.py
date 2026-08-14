@@ -31,6 +31,8 @@ def init_db() -> None:
         "community_tokens": "INTEGER",
         "free_xp": "INTEGER",
         "elite_commander_xp": "INTEGER",
+        "port_ships_json": "TEXT",
+        "line_state_json": "TEXT DEFAULT '{}'",
     }
     existing = {column["name"] for column in inspect(engine).get_columns("daily_snapshots")}
     with engine.begin() as connection:
@@ -43,6 +45,13 @@ def init_db() -> None:
         connection.execute(text("UPDATE resource_forecasts SET cadence = 'once' WHERE cadence IS NULL OR cadence = ''"))
         connection.execute(text("UPDATE reward_goals SET deadline = '2027-02-01'"))
         connection.execute(text("UPDATE reset_plans SET deadline = '2027-02-01'"))
+        plan_columns = {column["name"] for column in inspect(engine).get_columns("reset_plans")}
+        if "target_resets" not in plan_columns:
+            connection.execute(text("ALTER TABLE reset_plans ADD COLUMN target_resets INTEGER DEFAULT 0"))
+        if "completed_cycles" not in plan_columns:
+            connection.execute(text("ALTER TABLE reset_plans ADD COLUMN completed_cycles INTEGER DEFAULT 0"))
+        if "waiting_for_reset" not in plan_columns:
+            connection.execute(text("ALTER TABLE reset_plans ADD COLUMN waiting_for_reset BOOLEAN DEFAULT 1"))
 
 
 def get_db():

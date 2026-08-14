@@ -4,7 +4,7 @@
  <article><span>当前代币</span><strong>{{ latest.holiday_tokens if latest and latest.holiday_tokens is not none else '—' }}</strong><small>目标 {{ projection.goal_tokens }}</small></article>
  <article><span>兑换后预计</span><strong>{{ projection.projected_tokens }}</strong><small>仍缺 {{ projection.gap_tokens }}</small></article>
  <article><span>额外所需研发点</span><strong>{{ projection.additional_research_points }}</strong><small>约 {{ projection.resets_required }} 次重置</small></article>
- <article><span>今日线路状态</span><strong class="{{ 'danger-text' if milestone and milestone.status == '落后' else '' }}">{{ milestone.status if milestone else '未配置' }}</strong><small>目标 {{ milestone.target.ship if milestone and milestone.target else '—' }} · 最近出战推断</small></article>
+ <article><span>今日线路状态</span><strong class="{{ 'danger-text' if milestone and milestone.status == '落后' else '' }}">{{ milestone.status if milestone else '未配置' }}</strong><small>目标 {{ milestone.target.ship if milestone and milestone.target else '—' }} · 仅按在港状态判断</small></article>
 </section>
 <div class="grid two"><section class="panel"><div class="panel-head"><h2>奖励目标</h2><a href="/goals">管理</a></div>{% if goals %}{% for goal in goals %}<div class="row"><div><b>{{ goal.name }}</b><small>{{ goal.deadline }}</small></div><span>{{ goal.token_cost * goal.quantity }} 代币</span></div>{% endfor %}{% else %}<p class="empty">尚未添加奖励。</p>{% endif %}</section>
 <section class="panel"><div class="panel-head"><h2>数据源</h2><a href="/settings">设置</a></div>{% for source in statuses %}<div class="row"><div><b>{{ source.name }}</b><small>{{ source.message }}</small></div><i class="dot {{ 'ok' if source.ok else 'bad' }}"></i></div>{% else %}<p class="empty">首次同步后显示状态。</p>{% endfor %}</section></div>
