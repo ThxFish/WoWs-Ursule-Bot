@@ -82,14 +82,20 @@ def send_email(db: Session, subject: str, content: str) -> None:
     username = get_setting(db, "smtp_username")
     password = get_setting(db, "smtp_password")
     recipient = get_setting(db, "smtp_recipient")
+    security = get_setting(db, "smtp_security", "ssl" if port == 465 else "starttls").lower()
     if not all((host, username, password, recipient)):
         raise RuntimeError("SMTP 配置不完整")
+    if security not in {"ssl", "starttls"}:
+        raise RuntimeError("SMTP 加密方式无效")
     message = EmailMessage()
     message["Subject"] = subject
     message["From"] = username
     message["To"] = recipient
     message.set_content(content)
-    with smtplib.SMTP_SSL(host, port, timeout=20) as smtp:
+    smtp_class = smtplib.SMTP_SSL if security == "ssl" else smtplib.SMTP
+    with smtp_class(host, port, timeout=20) as smtp:
+        if security == "starttls":
+            smtp.starttls()
         smtp.login(username, password)
         smtp.send_message(message)
 

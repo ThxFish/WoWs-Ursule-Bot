@@ -22,7 +22,7 @@ from .config import config
 from .backup import create_backup, list_backups, prune_automatic_backups, restore_backup
 from .db import SessionLocal, get_db, init_db
 from .models import DailySnapshot, ManualOverride, ResourceForecast, ResetPlan, RewardGoal, utcnow
-from .notifications import DEFAULT_QQ_MESSAGE_TEMPLATE, notify_with_fallback, render_message_template
+from .notifications import DEFAULT_QQ_MESSAGE_TEMPLATE, notify_with_fallback, render_message_template, send_email
 from .planner import BRITISH_LIGHT_CRUISER_LINE, EVENT_DEADLINE, LINE_XP_PER_RESET, build_regrind_baseline, reset_count
 from .security import csrf_valid, hash_password, new_session, read_session, verify_password
 from .service import dashboard_context, guarded_sync, report_text
@@ -394,7 +394,7 @@ async def edit_snapshot(snapshot_id: int, request: Request, db: Session = Depend
 
 @app.get("/settings", response_class=HTMLResponse)
 def settings_page(request: Request, db: Session = Depends(get_db)):
-    keys = ["account_id", "committed_coal", "committed_steel", "committed_research_points", "daily_token_target", "qq_app_id", "qq_user_openid", "qq_group_openid", "qq_message_template", "qq_daily_target", "qq_target_id", "qq_target_type", "smtp_host", "smtp_port", "smtp_username", "smtp_recipient"]
+    keys = ["account_id", "committed_coal", "committed_steel", "committed_research_points", "daily_token_target", "qq_app_id", "qq_user_openid", "qq_group_openid", "qq_message_template", "qq_daily_target", "qq_target_id", "qq_target_type", "smtp_host", "smtp_port", "smtp_security", "smtp_username", "smtp_recipient"]
     values = {key: get_setting(db, key) for key in keys}
     if not values["qq_user_openid"] and not values["qq_group_openid"] and values["qq_target_id"]:
         values["qq_group_openid" if values["qq_target_type"] == "group" else "qq_user_openid"] = values["qq_target_id"]
@@ -438,7 +438,7 @@ async def save_settings(request: Request, db: Session = Depends(get_db)):
     form = await request.form()
     require_csrf(request, str(form.get("csrf", "")))
     secrets = {"wg_application_id", "qq_app_secret", "smtp_password"}
-    allowed = {"account_id", "wg_application_id", "committed_coal", "committed_steel", "committed_research_points", "daily_token_target", "qq_app_id", "qq_app_secret", "qq_user_openid", "qq_group_openid", "qq_message_template", "qq_daily_target", "smtp_host", "smtp_port", "smtp_username", "smtp_password", "smtp_recipient"}
+    allowed = {"account_id", "wg_application_id", "committed_coal", "committed_steel", "committed_research_points", "daily_token_target", "qq_app_id", "qq_app_secret", "qq_user_openid", "qq_group_openid", "qq_message_template", "qq_daily_target", "smtp_host", "smtp_port", "smtp_security", "smtp_username", "smtp_password", "smtp_recipient"}
     clearable = {"qq_user_openid", "qq_group_openid", "qq_message_template"}
     if "qq_message_template" in form:
         try:
@@ -447,6 +447,8 @@ async def save_settings(request: Request, db: Session = Depends(get_db)):
             raise HTTPException(400, str(exc))
     if "qq_daily_target" in form and str(form["qq_daily_target"]) not in {"user", "group", "both"}:
         raise HTTPException(400, "未知 QQ 每日通知目标")
+    if "smtp_security" in form and str(form["smtp_security"]) not in {"ssl", "starttls"}:
+        raise HTTPException(400, "未知 SMTP 加密方式")
     for key in allowed:
         if key in form and (str(form[key]).strip() or key in clearable):
             set_setting(db, key, str(form[key]).strip(), secret=key in secrets)
@@ -505,6 +507,12 @@ async def notification_test(request: Request, csrf: str = Form(...), db: Session
 @app.post("/api/notify/test/{target}")
 async def notification_target_test(target: str, request: Request, csrf: str = Form(...), db: Session = Depends(get_db)):
     require_csrf(request, csrf)
+    if target == "email":
+        try:
+            send_email(db, "WoWS Tracker 邮件测试", "WoWS Tracker SMTP 邮件测试成功。")
+            return RedirectResponse("/settings?notice=email_test", status_code=303)
+        except Exception as exc:
+            raise HTTPException(502, f"SMTP 测试失败：{exc}")
     if target not in {"user", "group"}:
         raise HTTPException(400, "未知 QQ 测试目标")
     try:
