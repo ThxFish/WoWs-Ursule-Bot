@@ -19,6 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .config import config
+from .armory_auth import interactive_login_available, login_status, start_interactive_login
 from .backup import create_backup, list_backups, prune_automatic_backups, restore_backup
 from .db import SessionLocal, get_db, init_db
 from .models import DailySnapshot, ManualOverride, ResourceForecast, ResetPlan, RewardGoal, utcnow
@@ -32,13 +33,13 @@ from .wargaming import build_login_url
 ROOT = Path(__file__).parent
 templates = Jinja2Templates(directory=str(ROOT / "templates"))
 templates.env.filters["from_json"] = lambda value: json.loads(value or "[]")
-templates.env.filters["datetime_local"] = lambda value: (value.replace(tzinfo=timezone.utc) if value and value.tzinfo is None else value).astimezone(ZoneInfo(config.timezone)).strftime("%Y-%m-%dT%H:%M") if value else ""
+templates.env.filters["datetime_local"] = lambda value: (value.replace(tzinfo=timezone.utc) if value and value.tzinfo is None else value).astimezone(ZoneInfo(config.timezone)).strftime("%Y-%m-%dT%H:%M:%S") if value else ""
 scheduler = AsyncIOScheduler(timezone=config.timezone)
 
 
 async def scheduled_sync() -> None:
     with SessionLocal() as db:
-        await guarded_sync(db)
+        await guarded_sync(db, capture_type="scheduled")
         try:
             backup_path = create_backup("auto")
             prune_automatic_backups(keep=30)
@@ -83,8 +84,11 @@ async def lifespan(app: FastAPI):
     qq_runtime = await start_listener()
     with SessionLocal() as db:
         if has_setup(db):
-            today = datetime.now().date()
-            if not db.scalar(select(DailySnapshot).where(DailySnapshot.snapshot_date == today)):
+            today = datetime.now(ZoneInfo(config.timezone)).date()
+            if not db.scalar(select(DailySnapshot).where(
+                DailySnapshot.snapshot_date == today,
+                DailySnapshot.capture_type == "scheduled",
+            )):
                 asyncio.create_task(scheduled_sync())
     try:
         yield
@@ -289,7 +293,7 @@ def save_plan(request: Request, csrf: str = Form(...), multiplier: int = Form(1)
 
 @app.get("/history", response_class=HTMLResponse)
 def history_page(request: Request, db: Session = Depends(get_db)):
-    snapshots = list(db.scalars(select(DailySnapshot).order_by(DailySnapshot.snapshot_date.desc()).limit(90)))
+    snapshots = list(db.scalars(select(DailySnapshot).order_by(DailySnapshot.collected_at.desc(), DailySnapshot.id.desc()).limit(200)))
     snapshot_views = []
     line_ids = {int(ship["ship_id"]): ship["name"] for ship in BRITISH_LIGHT_CRUISER_LINE}
     for snapshot in snapshots:
@@ -312,7 +316,7 @@ def history_page(request: Request, db: Session = Depends(get_db)):
 @app.post("/api/snapshots/capture")
 async def capture_snapshot(request: Request, csrf: str = Form(...), db: Session = Depends(get_db)):
     require_csrf(request, csrf)
-    await guarded_sync(db)
+    await guarded_sync(db, capture_type="manual_snapshot")
     return RedirectResponse("/history?captured=1", status_code=303)
 
 
@@ -376,7 +380,7 @@ async def edit_snapshot(snapshot_id: int, request: Request, db: Session = Depend
         state.update({"waiting_for_reset": waiting, "current_ship_index": current_index, "completed_cycles": completed_cycles, "event": f"手工修正：{reason}"})
         snapshot.line_state_json = json.dumps(state, ensure_ascii=False)
         db.add(ManualOverride(snapshot_date=snapshot.snapshot_date, field_name=f"snapshot.{snapshot.id}.line_state", value=json.dumps(state, ensure_ascii=False), reason=reason))
-        latest_id = db.scalar(select(DailySnapshot.id).order_by(DailySnapshot.snapshot_date.desc()).limit(1))
+        latest_id = db.scalar(select(DailySnapshot.id).order_by(DailySnapshot.collected_at.desc(), DailySnapshot.id.desc()).limit(1))
         active_plan = db.scalar(select(ResetPlan).where(ResetPlan.active.is_(True)).order_by(ResetPlan.id.desc()).limit(1))
         if snapshot.id == latest_id and active_plan:
             active_plan.waiting_for_reset = waiting
@@ -402,7 +406,15 @@ def settings_page(request: Request, db: Session = Depends(get_db)):
     values["qq_daily_target"] = values["qq_daily_target"] or values["qq_target_type"] or "user"
     backups = [{"name": path.name, "size": path.stat().st_size, "modified": datetime.fromtimestamp(path.stat().st_mtime, ZoneInfo(config.timezone))} for path in list_backups(limit=10)]
     backup_status = {"at": get_setting(db, "last_backup_at"), "file": get_setting(db, "last_backup_file"), "error": get_setting(db, "last_backup_error")}
-    return templates.TemplateResponse("settings.html", page_context(request, values=values, auth_state=(config.data_dir / "auth" / "armory-storage.json").exists(), backups=backups, backup_status=backup_status))
+    return templates.TemplateResponse("settings.html", page_context(
+        request,
+        values=values,
+        auth_state=(config.data_dir / "auth" / "armory-storage.json").exists(),
+        armory_login_status=login_status(),
+        armory_interactive=interactive_login_available(),
+        backups=backups,
+        backup_status=backup_status,
+    ))
 
 
 @app.post("/api/backup/export")
@@ -461,7 +473,9 @@ async def import_armory_state(request: Request, csrf: str = Form(...), state_fil
     require_csrf(request, csrf)
     if state_file is None:
         raise HTTPException(400, "请选择登录状态文件")
-    raw = await state_file.read()
+    raw = await state_file.read(5 * 1024 * 1024 + 1)
+    if len(raw) > 5 * 1024 * 1024:
+        raise HTTPException(413, "登录状态文件不能超过 5MB")
     try:
         payload = json.loads(raw)
         if not isinstance(payload.get("cookies"), list):
@@ -469,14 +483,38 @@ async def import_armory_state(request: Request, csrf: str = Form(...), state_fil
     except Exception:
         raise HTTPException(400, "不是有效的 Playwright storage_state 文件")
     path = config.data_dir / "auth" / "armory-storage.json"
-    path.write_bytes(raw)
+    temporary = path.with_suffix(".upload.json")
+    temporary.write_bytes(raw)
+    temporary.replace(path)
     return RedirectResponse("/settings", status_code=303)
+
+
+async def sync_after_armory_login() -> None:
+    with SessionLocal() as db:
+        await guarded_sync(db, capture_type="armory_login")
+
+
+@app.post("/api/auth/armory/login")
+async def open_armory_login(request: Request, csrf: str = Form(...)):
+    require_csrf(request, csrf)
+    if not interactive_login_available():
+        raise HTTPException(409, "当前主机没有图形桌面，请在 Windows 登录后导入登录状态")
+    start_interactive_login(on_success=sync_after_armory_login)
+    return RedirectResponse("/settings?armory_login=started", status_code=303)
+
+
+@app.get("/api/auth/armory/login/status", response_class=HTMLResponse)
+def armory_login_status(request: Request):
+    return templates.TemplateResponse("partials/armory_login_status.html", {
+        "request": request,
+        "status": login_status(),
+    })
 
 
 @app.post("/api/sync")
 async def manual_sync(request: Request, csrf: str = Form(...), db: Session = Depends(get_db)):
     require_csrf(request, csrf)
-    await guarded_sync(db)
+    await guarded_sync(db, capture_type="manual_sync")
     return RedirectResponse("/", status_code=303)
 
 
@@ -543,5 +581,5 @@ def wargaming_callback(status: str = "", access_token: str = "", account_id: str
 
 @app.get("/api/history")
 def history_api(db: Session = Depends(get_db)):
-    rows = list(db.scalars(select(DailySnapshot).order_by(DailySnapshot.snapshot_date.desc()).limit(90)))
-    return [{"date": row.snapshot_date, "tokens": row.holiday_tokens, "credits": row.credits, "gold": row.gold, "coal": row.coal, "steel": row.steel, "research_points": row.research_points, "community_tokens": row.community_tokens, "free_xp": row.free_xp, "elite_commander_xp": row.elite_commander_xp, "boosters": json.loads(row.boosters_json), "battles": row.battles_total, "xp": row.xp_total, "sources": json.loads(row.source_status_json)} for row in rows]
+    rows = list(db.scalars(select(DailySnapshot).order_by(DailySnapshot.collected_at.desc(), DailySnapshot.id.desc()).limit(200)))
+    return [{"id": row.id, "date": row.snapshot_date, "collected_at": row.collected_at, "capture_type": row.capture_type, "tokens": row.holiday_tokens, "credits": row.credits, "gold": row.gold, "coal": row.coal, "steel": row.steel, "research_points": row.research_points, "community_tokens": row.community_tokens, "free_xp": row.free_xp, "elite_commander_xp": row.elite_commander_xp, "boosters": json.loads(row.boosters_json), "battles": row.battles_total, "xp": row.xp_total, "sources": json.loads(row.source_status_json)} for row in rows]

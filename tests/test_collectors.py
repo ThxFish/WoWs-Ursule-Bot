@@ -1,4 +1,4 @@
-from tracker.collectors import parse_account_balance, parse_armory_inventory
+from tracker.collectors import ArmoryResponseCapture, parse_account_balance, parse_armory_inventory
 
 
 def test_parse_armory_inventory_nested_payload():
@@ -26,3 +26,34 @@ def test_parse_account_balance_currency_codes():
     result = parse_account_balance(payload)
     assert (result.holiday_tokens, result.gold, result.coal, result.steel, result.research_points) == (1200, 2906, 256940, 8303, 518)
     assert (result.free_xp, result.elite_commander_xp) == (128288, 268205)
+
+
+def test_parse_nested_account_balance():
+    result = parse_account_balance({"data": {"account": {"balance": [{"currency": "coal", "value": 123}]}}})
+    assert result.coal == 123
+
+
+class FakeRequest:
+    resource_type = "fetch"
+
+
+class FakeResponse:
+    request = FakeRequest()
+    headers = {"content-type": "application/json; charset=utf-8"}
+    url = "https://armory.worldofwarships.eu/new/internal/wallet"
+
+    async def json(self):
+        return {
+            "data": {
+                "items_storage": {"4281331632": 132},
+                "account": {"balance": [{"currency": "coal", "value": 256940}]},
+            }
+        }
+
+
+async def test_capture_matches_payload_shape_when_endpoint_changes():
+    capture = ArmoryResponseCapture()
+    await capture.handle(FakeResponse())
+    assert capture.ready()
+    assert capture.result().coal == 256940
+    assert capture.result().boosters["rare_credits"] == 132

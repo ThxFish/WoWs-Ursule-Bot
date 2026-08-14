@@ -1,0 +1,6 @@
+{% set current = status if status is defined else armory_login_status %}
+<div id="armory-login-status" {% if current.state in ['opening', 'waiting', 'syncing'] %}hx-get="/api/auth/armory/login/status" hx-trigger="every 2s" hx-swap="outerHTML"{% endif %}>
+  {% if current.state != 'idle' %}
+  <p class="alert {{ 'good' if current.state == 'success' else 'bad' if current.state == 'error' else '' }}">{{ current.message }}</p>
+  {% endif %}
+</div>

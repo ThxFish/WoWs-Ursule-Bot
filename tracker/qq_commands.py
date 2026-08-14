@@ -110,7 +110,7 @@ def _safe_error(value: object) -> str:
 
 async def _sync_text() -> str:
     with SessionLocal() as db:
-        snapshot = await guarded_sync(db)
+        snapshot = await guarded_sync(db, capture_type="qq")
         statuses = json.loads(snapshot.source_status_json or "{}")
         succeeded = [name for name, status in statuses.items() if status.get("ok")]
         failed = [f"{name}: {_safe_error(status.get('error', '失败'))}" for name, status in statuses.items() if not status.get("ok")]

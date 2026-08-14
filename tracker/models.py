@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 
-from sqlalchemy import Boolean, Date, DateTime, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Date, DateTime, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
@@ -59,9 +59,9 @@ class ResetPlan(Base):
 
 class DailySnapshot(Base):
     __tablename__ = "daily_snapshots"
-    __table_args__ = (UniqueConstraint("snapshot_date", name="uq_snapshot_date"),)
     id: Mapped[int] = mapped_column(primary_key=True)
     snapshot_date: Mapped[date] = mapped_column(Date)
+    capture_type: Mapped[str] = mapped_column(String(24), default="manual", server_default="legacy")
     holiday_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     credits: Mapped[int | None] = mapped_column(Integer, nullable=True)
     gold: Mapped[int | None] = mapped_column(Integer, nullable=True)

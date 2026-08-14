@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from playwright.async_api import async_playwright
@@ -62,10 +64,13 @@ def _walk(value: Any):
 
 def parse_armory_inventory(payload: Any) -> ArmoryData:
     data = ArmoryData()
-    item_storage = payload.get("data", {}).get("items_storage", {}) if isinstance(payload, dict) else {}
-    if isinstance(item_storage, dict):
-        for item_id, booster_name in RARE_BOOSTER_IDS.items():
-            data.boosters[booster_name] = int(item_storage.get(item_id, 0) or 0)
+    for node in _walk(payload):
+        if "items_storage" not in node:
+            continue
+        item_storage = node.get("items_storage")
+        if isinstance(item_storage, dict):
+            for item_id, booster_name in RARE_BOOSTER_IDS.items():
+                data.boosters[booster_name] = int(item_storage.get(item_id, 0) or 0)
     aliases = {
         "coal": "coal",
         "steel": "steel",
@@ -90,58 +95,145 @@ def parse_armory_inventory(payload: Any) -> ArmoryData:
 
 def parse_account_balance(payload: Any) -> ArmoryData:
     data = ArmoryData()
-    rows = payload.get("balance", []) if isinstance(payload, dict) else []
-    for row in rows:
-        if not isinstance(row, dict):
+    for node in _walk(payload):
+        rows = node.get("balance", [])
+        if not isinstance(rows, list):
             continue
-        field_name = BALANCE_FIELDS.get(str(row.get("currency", "")))
-        value = row.get("value")
-        if field_name and isinstance(value, (int, float)):
-            setattr(data, field_name, int(value))
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            field_name = BALANCE_FIELDS.get(str(row.get("currency", "")))
+            value = row.get("value")
+            if field_name and isinstance(value, (int, float)):
+                setattr(data, field_name, int(value))
     return data
+
+
+ARMORY_RESOURCE_FIELDS = tuple(dict.fromkeys(BALANCE_FIELDS.values()))
+
+
+def merge_armory_data(target: ArmoryData, source: ArmoryData) -> None:
+    target.boosters.update(source.boosters)
+    for field_name in ARMORY_RESOURCE_FIELDS:
+        value = getattr(source, field_name)
+        if value is not None:
+            setattr(target, field_name, value)
+
+
+def _payload_has_key(payload: Any, key: str) -> bool:
+    return any(key in node for node in _walk(payload))
+
+
+class ArmoryResponseCapture:
+    """Collect Armory JSON by payload shape instead of unstable endpoint URLs."""
+
+    def __init__(self) -> None:
+        self.payloads: list[Any] = []
+        self.paths: set[str] = set()
+        self.has_inventory = False
+        self.has_balance = False
+
+    async def handle(self, response) -> None:
+        try:
+            if response.request.resource_type not in {"xhr", "fetch"}:
+                return
+            content_type = response.headers.get("content-type", "").lower()
+            if "json" not in content_type:
+                return
+            payload = await response.json()
+            path = urlsplit(response.url).path
+            inventory = "inventory" in path.lower() or _payload_has_key(payload, "items_storage") or _payload_has_key(payload, "inventory")
+            balance = "account" in path.lower() or _payload_has_key(payload, "balance")
+            parsed_balance = parse_account_balance(payload)
+            balance = balance or any(getattr(parsed_balance, field) is not None for field in ARMORY_RESOURCE_FIELDS)
+            if inventory or balance:
+                self.payloads.append(payload)
+                self.paths.add(path)
+                self.has_inventory = self.has_inventory or inventory
+                self.has_balance = self.has_balance or balance
+        except Exception:
+            return
+
+    def result(self) -> ArmoryData:
+        result = ArmoryData()
+        for payload in self.payloads:
+            merge_armory_data(result, parse_armory_inventory(payload))
+            merge_armory_data(result, parse_account_balance(payload))
+        return result
+
+    def ready(self) -> bool:
+        result = self.result()
+        has_resources = any(getattr(result, field) is not None for field in ARMORY_RESOURCE_FIELDS)
+        return self.has_inventory and has_resources
+
+    def diagnostic(self) -> str:
+        paths = ", ".join(sorted(self.paths)) or "未发现军械库 JSON 接口"
+        return f"inventory={'是' if self.has_inventory else '否'}，balance={'是' if self.has_balance else '否'}；接口：{paths}"
+
+
+async def save_storage_state(context, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.{id(context)}.tmp")
+    await context.storage_state(path=str(temporary), indexed_db=True)
+    os.replace(temporary, destination)
+
+
+async def trigger_armory_wallet(page, allow_navigation_fallback: bool = False) -> bool:
+    """Open the lazy-loaded wallet so the Armory emits inventory data."""
+    selectors = (
+        ".armory__auto--wallet_icon",
+        '[data-menu-item="wallet"]',
+        'a[href*="/wallet/"]',
+    )
+    try:
+        for selector in selectors:
+            candidates = page.locator(selector)
+            for index in range(min(await candidates.count(), 5)):
+                candidate = candidates.nth(index)
+                if await candidate.is_visible():
+                    await candidate.click(timeout=3_000)
+                    return True
+        for label in ("钱包", "所有资源", "Wallet", "Resources"):
+            candidates = page.get_by_text(label, exact=True)
+            for index in range(min(await candidates.count(), 5)):
+                candidate = candidates.nth(index)
+                if await candidate.is_visible():
+                    await candidate.click(timeout=3_000)
+                    return True
+        if allow_navigation_fallback and "/wallet" not in page.url:
+            await page.goto("https://armory.worldofwarships.eu/zh-sg/wallet/", wait_until="domcontentloaded", timeout=30_000)
+            return True
+    except Exception:
+        return False
+    return False
 
 
 async def collect_armory(storage_state: Path | None = None, timeout_seconds: int = 45) -> ArmoryData:
     state = storage_state or config.data_dir / "auth" / "armory-storage.json"
     if not state.exists():
         raise CollectionError("尚未导入军械库登录状态")
-    inventory_payloads: list[Any] = []
-    account_payloads: list[Any] = []
+    capture = ArmoryResponseCapture()
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
-        context = await browser.new_context(storage_state=str(state), service_workers="block")
+        context = await browser.new_context(storage_state=str(state))
         page = await context.new_page()
-
-        async def capture(response):
-            try:
-                if response.url.rstrip("/").endswith("/api/inventory"):
-                    inventory_payloads.append(await response.json())
-                elif response.url.rstrip("/").endswith("/zh-sg/api/account/info"):
-                    account_payloads.append(await response.json())
-            except Exception:
-                pass
-
-        page.on("response", capture)
+        page.on("response", capture.handle)
         try:
-            await page.goto("https://armory.worldofwarships.eu/zh-sg/", wait_until="networkidle", timeout=timeout_seconds * 1000)
-            await page.wait_for_timeout(2500)
+            await page.goto("https://armory.worldofwarships.eu/zh-sg/", wait_until="domcontentloaded", timeout=timeout_seconds * 1000)
+            wallet_triggered = False
+            for _ in range(min(timeout_seconds, 20) * 2):
+                if capture.ready():
+                    break
+                if not capture.has_inventory and not wallet_triggered:
+                    wallet_triggered = await trigger_armory_wallet(page, allow_navigation_fallback=True)
+                await page.wait_for_timeout(500)
+            if capture.ready():
+                await save_storage_state(context, state)
         finally:
             await browser.close()
-    if not inventory_payloads:
-        raise CollectionError("未捕获 inventory 响应，登录可能已失效或军械库结构已变化")
-    if not account_payloads:
-        raise CollectionError("未捕获 account/info 资源响应，登录可能已失效或军械库结构已变化")
-    result = ArmoryData()
-    for payload in inventory_payloads:
-        parsed = parse_armory_inventory(payload)
-        result.boosters.update(parsed.boosters)
-    for payload in account_payloads:
-        parsed = parse_account_balance(payload)
-        for field_name in BALANCE_FIELDS.values():
-            value = getattr(parsed, field_name)
-            if value is not None:
-                setattr(result, field_name, value)
-    return result
+    if not capture.ready():
+        raise CollectionError(f"军械库未返回完整资源数据，登录可能失效或页面尚未加载完成。{capture.diagnostic()}")
+    return capture.result()
 
 
 async def collect_wargaming(application_id: str, account_id: str, access_token: str = "") -> dict:

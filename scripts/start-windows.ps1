@@ -6,5 +6,5 @@ if (-not (Test-Path -LiteralPath '.venv\Scripts\python.exe')) {
 }
 & .\.venv\Scripts\python.exe -m pip install --upgrade pip
 & .\.venv\Scripts\python.exe -m pip install -e '.[test]'
+& .\.venv\Scripts\python.exe -m playwright install chromium
 & .\.venv\Scripts\python.exe -m tracker
-

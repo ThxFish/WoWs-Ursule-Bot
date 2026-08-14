@@ -34,10 +34,9 @@ def _status(db: Session, name: str, ok: bool, message: str) -> None:
     db.add(row)
 
 
-async def sync_all(db: Session) -> DailySnapshot:
+async def sync_all(db: Session, capture_type: str = "manual") -> DailySnapshot:
     today = datetime.now(ZoneInfo(config.timezone)).date()
-    existing = db.scalar(select(DailySnapshot).where(DailySnapshot.snapshot_date == today))
-    snapshot = existing or DailySnapshot(snapshot_date=today)
+    snapshot = DailySnapshot(snapshot_date=today, capture_type=capture_type)
     statuses: dict[str, dict] = {}
 
     try:
@@ -67,16 +66,13 @@ async def sync_all(db: Session) -> DailySnapshot:
         active_plan = db.scalar(select(ResetPlan).where(ResetPlan.active.is_(True)).order_by(ResetPlan.id.desc()).limit(1))
         port_ships = wg.get("port_ships")
         if port_ships is not None:
-            same_day_previous = json.loads(snapshot.port_ships_json) if snapshot.port_ships_json else None
             previous = db.scalar(
                 select(DailySnapshot)
-                .where(DailySnapshot.snapshot_date < today, DailySnapshot.port_ships_json.is_not(None))
-                .order_by(DailySnapshot.snapshot_date.desc())
+                .where(DailySnapshot.port_ships_json.is_not(None))
+                .order_by(DailySnapshot.collected_at.desc(), DailySnapshot.id.desc())
                 .limit(1)
             )
-            previous_port = same_day_previous
-            if previous_port is None:
-                previous_port = json.loads(previous.port_ships_json) if previous and previous.port_ships_json else None
+            previous_port = json.loads(previous.port_ships_json) if previous and previous.port_ships_json else None
             snapshot.port_ships_json = json.dumps(port_ships)
             if active_plan:
                 state = update_line_state(
@@ -123,15 +119,15 @@ async def sync_all(db: Session) -> DailySnapshot:
 SYNC_LOCK = asyncio.Lock()
 
 
-async def guarded_sync(db: Session) -> DailySnapshot:
+async def guarded_sync(db: Session, capture_type: str = "manual") -> DailySnapshot:
     """Serialize scheduled, web, and QQ-triggered collection runs."""
     async with SYNC_LOCK:
-        return await sync_all(db)
+        return await sync_all(db, capture_type=capture_type)
 
 
 def dashboard_context(db: Session) -> dict:
     goals = list(db.scalars(select(RewardGoal).where(RewardGoal.active.is_(True)).order_by(RewardGoal.deadline)))
-    latest = db.scalar(select(DailySnapshot).order_by(DailySnapshot.snapshot_date.desc()).limit(1))
+    latest = db.scalar(select(DailySnapshot).order_by(DailySnapshot.collected_at.desc(), DailySnapshot.id.desc()).limit(1))
     overrides = {}
     for override in db.scalars(select(ManualOverride).order_by(ManualOverride.created_at)):
         overrides[override.field_name] = override.value
