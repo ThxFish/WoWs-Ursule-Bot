@@ -68,6 +68,10 @@ tests/
 
 要求 Windows 10/11、PowerShell 与 Python 3.12+。
 
+直接双击仓库根目录的 `start.bat` 即可启动。首次启动会自动创建 `.env`、虚拟环境并安装依赖；已有 `.env` 不会被覆盖。
+
+也可以在 PowerShell 中启动：
+
 ```powershell
 Copy-Item .env.example .env
 .\scripts\start-windows.ps1

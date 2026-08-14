@@ -1,6 +1,10 @@
 $ErrorActionPreference = 'Stop'
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 Set-Location -LiteralPath $ProjectRoot
+if (-not (Test-Path -LiteralPath '.env')) {
+    Copy-Item -LiteralPath '.env.example' -Destination '.env'
+    Write-Host 'Created .env from .env.example. You can update it later in the Web settings.'
+}
 if (-not (Test-Path -LiteralPath '.venv\Scripts\python.exe')) {
     py -3 -m venv .venv
 }
