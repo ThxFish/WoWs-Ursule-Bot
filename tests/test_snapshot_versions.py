@@ -3,11 +3,11 @@ from datetime import date, datetime, timezone
 from sqlalchemy import create_engine, inspect, select, text
 from sqlalchemy.orm import Session
 
-from tracker import db as db_module
-from tracker import service
-from tracker.collectors import ArmoryData
-from tracker.db import Base
-from tracker.models import DailySnapshot
+from ursule_bot.core import database as db_module
+from ursule_bot.centers.planning import sync_service as service
+from ursule_bot.integrations.collectors import ArmoryData
+from ursule_bot.core.database import Base
+from ursule_bot.centers.planning.models import DailySnapshot
 
 
 async def test_each_sync_creates_an_independent_snapshot(monkeypatch):

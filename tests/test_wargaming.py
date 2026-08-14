@@ -1,6 +1,6 @@
 from urllib.parse import parse_qs, urlparse
 
-from tracker.wargaming import build_login_url
+from ursule_bot.integrations.wargaming_auth import build_login_url
 
 
 def test_wargaming_openid_uses_shared_wot_auth_endpoint():

@@ -1,0 +1,17 @@
+{% extends "base.html" %}{% block content %}
+<section class="hero portal-hero">
+  <div><p class="eyebrow">COMMAND CENTER</p><h1>欢迎回来，指挥官。</h1><p class="muted">最近数据：{{ planning.latest.snapshot_date if planning.latest else '尚未同步' }} · 三个中心共享同一套可靠数据与通知基础。</p></div>
+  <form method="post" action="/api/system/sync"><input type="hidden" name="csrf" value="{{ csrf }}"><button>立即同步</button></form>
+</section>
+
+<section class="center-grid" aria-label="功能中心">
+  <a class="center-card planning-card" href="/planning"><div class="center-icon">◇</div><p class="eyebrow">ACTIVE</p><h2>活动规划中心</h2><p>奖励目标、资源投入、研发局重爬和进度快照。</p><div class="center-metrics"><span><b>{{ planning.latest.holiday_tokens if planning.latest and planning.latest.holiday_tokens is not none else '—' }}</b>当前代币</span><span><b>{{ planning.projection.gap_tokens }}</b>预计缺口</span><span><b>{{ planning.milestone.status if planning.milestone else '未配置' }}</b>线路状态</span></div><strong class="enter">进入中心 →</strong></a>
+  <a class="center-card" href="/stats"><div class="center-icon">△</div><span class="badge">建设中</span><h2>战绩中心</h2><p>{{ stats_center.description }}</p><div class="placeholder-lines"><i></i><i></i><i></i></div><strong class="enter">查看中心 →</strong></a>
+  <a class="center-card" href="/information"><div class="center-icon">◎</div><span class="badge">建设中</span><h2>信息中心</h2><p>{{ information_center.description }}</p><div class="placeholder-lines"><i></i><i></i><i></i></div><strong class="enter">查看中心 →</strong></a>
+</section>
+
+<div class="grid two dashboard-lower">
+  <section class="panel"><div class="panel-head"><div><p class="eyebrow">SYSTEM HEALTH</p><h2>数据源状态</h2></div><a href="/settings">管理集成</a></div>{% for source in planning.statuses %}<div class="row"><div><b>{{ source.name }}</b><small>{{ source.message }}</small></div><span class="status-chip {{ 'ok' if source.ok else 'bad' }}">{{ '正常' if source.ok else '异常' }}</span></div>{% else %}<p class="empty">首次同步后显示数据源状态。</p>{% endfor %}</section>
+  <section class="panel"><div class="panel-head"><div><p class="eyebrow">QUICK ACCESS</p><h2>快捷入口</h2></div></div><div class="quick-grid"><a href="/planning/goals"><b>奖励与资源</b><small>调整目标和投入</small></a><a href="/planning/regrind"><b>重爬时间轴</b><small>检查每日里程碑</small></a><a href="/planning/snapshots"><b>进度快照</b><small>审计历史数据</small></a><a href="/settings"><b>系统设置</b><small>账号、通知与备份</small></a></div><p class="backup-line">最近备份：{{ backup_status.file or '尚无记录' }}{% if backup_status.error %}<span class="danger-text"> · {{ backup_status.error }}</span>{% endif %}</p></section>
+</div>
+{% endblock %}

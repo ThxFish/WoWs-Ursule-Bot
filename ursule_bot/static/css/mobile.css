@@ -1,0 +1,5 @@
+@media (max-width: 760px) {
+  .topbar nav {
+    flex: 0 0 100%;
+  }
+}

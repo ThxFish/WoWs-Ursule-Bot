@@ -1,4 +1,4 @@
-from tracker import notifications
+from ursule_bot.integrations import notifications
 
 
 class FakeSMTP:

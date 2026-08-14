@@ -3,11 +3,12 @@ requires = ["setuptools>=75"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "wows-marathon-tracker"
-version = "0.1.0"
-description = "World of Warships Holiday Convoy progress tracker"
+name = "wows-ursule-bot"
+version = "0.2.0"
+description = "Self-hosted personal World of Warships assistant"
 requires-python = ">=3.12"
 dependencies = [
+  "alembic==1.16.5",
   "apscheduler==3.11.0",
   "argon2-cffi==23.1.0",
   "cryptography==45.0.6",
@@ -26,7 +27,7 @@ dependencies = [
 test = ["pytest==8.4.1", "pytest-asyncio==1.1.0"]
 
 [tool.setuptools.packages.find]
-include = ["tracker*"]
+include = ["ursule_bot*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

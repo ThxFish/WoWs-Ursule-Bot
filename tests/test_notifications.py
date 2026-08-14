@@ -1,6 +1,6 @@
 import pytest
 
-from tracker.notifications import QQ_API_BASE, qq_targets, render_message_template
+from ursule_bot.integrations.notifications import QQ_API_BASE, qq_targets, render_message_template
 
 
 def test_qq_uses_current_official_api_domain():

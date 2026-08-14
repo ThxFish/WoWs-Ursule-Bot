@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 
-from tracker.armory_auth import login_status, run_interactive_login
+from ursule_bot.integrations.armory_auth import login_status, run_interactive_login
 
 
 async def main() -> None:

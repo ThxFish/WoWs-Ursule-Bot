@@ -2,16 +2,16 @@ services:
   app:
     build:
       context: .
-    image: wows-marathon-tracker:0.1.0
+    image: wows-ursule-bot:0.2.0
     restart: unless-stopped
     init: true
     shm_size: 1gb
     env_file:
       - .env
     environment:
-      TRACKER_DATA_DIR: /data
-      TRACKER_HOST: 0.0.0.0
-      TRACKER_PORT: 8000
+      URSULE_DATA_DIR: /data
+      URSULE_HOST: 0.0.0.0
+      URSULE_PORT: 8000
     ports:
       - "127.0.0.1:8000:8000"
     volumes:
@@ -22,4 +22,3 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
-

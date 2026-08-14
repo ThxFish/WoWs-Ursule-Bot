@@ -5,7 +5,7 @@ from contextlib import closing
 
 import pytest
 
-from tracker.backup import create_backup, restore_backup
+from ursule_bot.jobs.backup import create_backup, restore_backup
 
 
 SCHEMA = """

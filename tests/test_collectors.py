@@ -1,4 +1,4 @@
-from tracker.collectors import ArmoryResponseCapture, parse_account_balance, parse_armory_inventory
+from ursule_bot.integrations.collectors import ArmoryResponseCapture, parse_account_balance, parse_armory_inventory
 
 
 def test_parse_armory_inventory_nested_payload():

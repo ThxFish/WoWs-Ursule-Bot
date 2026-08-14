@@ -1,6 +1,6 @@
 import pytest
 
-from tracker.qq_commands import execute_command, parse_command
+from ursule_bot.interfaces.qq.commands import execute_command, parse_command
 
 
 def test_command_format_is_strict():
@@ -16,4 +16,4 @@ def test_command_format_is_strict():
 @pytest.mark.asyncio
 async def test_group_cannot_trigger_sync():
     response = await execute_command("同步", allow_sync=False)
-    assert "群聊不允许" in response
+    assert "群聊不允许" in response.text
