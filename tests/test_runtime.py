@@ -23,6 +23,12 @@ def test_scheduler_is_registered_only_once(monkeypatch):
     runtime.start_scheduler()
 
     assert scheduler.starts == 1
-    assert len(scheduler.jobs) == 1
+    assert len(scheduler.jobs) == 2
     assert scheduler.jobs[0][1]["id"] == "daily-sync"
+    assert scheduler.jobs[0][1]["hour"] == 4
+    assert scheduler.jobs[0][1]["minute"] == 0
     assert scheduler.jobs[0][1]["max_instances"] == 1
+    assert scheduler.jobs[1][1]["id"] == "daily-report"
+    assert scheduler.jobs[1][1]["hour"] == 10
+    assert scheduler.jobs[1][1]["minute"] == 0
+    assert scheduler.jobs[1][1]["max_instances"] == 1
