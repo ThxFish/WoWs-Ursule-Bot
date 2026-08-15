@@ -1,8 +1,18 @@
 import ast
+import tomllib
 from pathlib import Path
+
+import ursule_bot
 
 
 ROOT = Path(__file__).resolve().parents[1] / "ursule_bot"
+
+
+def test_package_version_matches_project_metadata():
+    pyproject = ROOT.parent / "pyproject.toml"
+    project = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]
+
+    assert ursule_bot.__version__ == project["version"]
 
 
 def _imports(path: Path) -> list[ast.ImportFrom | ast.Import]:

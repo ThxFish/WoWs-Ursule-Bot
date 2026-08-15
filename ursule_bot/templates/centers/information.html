@@ -1,4 +1,5 @@
 {% extends "base.html" %}{% block title %}信息中心 · Ursule Bot{% endblock %}{% block content %}
-<section class="hero"><div><p class="eyebrow">INFORMATION CENTER</p><h1>{{ center.title }}</h1><p class="muted">{{ center.description }}</p></div><span class="badge large">建设中</span></section>
-<section class="empty-center panel"><div class="center-icon">◎</div><h2>结构已经就绪</h2><p>后续将在此接入官方公告、版本更新、维护通知与活动情报，并复用现有调度和通知通道。</p><div class="future-grid"><span>更新公告</span><span>维护提醒</span><span>活动日历</span><span>订阅规则</span></div></section>
+<section class="hero"><div><p class="eyebrow">INFORMATION CENTER</p><h1>{{ center.title }}</h1><p class="muted">{{ center.description }}</p></div><span class="badge large">近 7 日</span></section>
+<section class="panel stats-toolbar"><div><h2>最新新闻图片</h2><p class="muted">每次请求实时读取官网与开发者博客，按发布时间从新到旧排列，最多八条。</p></div><a class="button" href="/api/information/image" target="_blank">刷新并下载 PNG</a></section>
+<section class="panel stats-preview"><img src="/api/information/image" alt="最近一周的战舰世界新闻"><p class="muted">标题与图片均沿用原站内容，不生成概括或翻译。</p></section>
 {% endblock %}

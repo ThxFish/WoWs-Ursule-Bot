@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import logging
 import time
+import traceback
 from collections import OrderedDict
 
 import botpy
@@ -13,15 +16,17 @@ from ...core.database import SessionLocal
 from ...core.settings import get_setting
 from ...core.system_models import DataSourceStatus
 from .commands import execute_command, parse_command
+from .types import BotReply
 
 
 Route.DOMAIN = "api.bot.qq.com"
 Route.SANDBOX_DOMAIN = "sandbox.api.bot.qq.com"
 
-SYNC_COOLDOWN_SECONDS = 300
 MESSAGE_RATE_SECONDS = 2
 MAX_REPLY_LENGTH = 1800
 MAX_REPLAY_IDS = 512
+
+logger = logging.getLogger(__name__)
 
 
 def _listener_status(ok: bool, message: str) -> None:
@@ -40,14 +45,16 @@ class UrsuleQQClient(botpy.Client):
     def __init__(self):
         super().__init__(intents=botpy.Intents(public_messages=True), bot_log=False)
         self._last_request: dict[str, float] = {}
-        self._sync_last_at = 0.0
         self._seen_ids: OrderedDict[str, float] = OrderedDict()
 
     async def on_ready(self):
         _listener_status(True, "QQ 命令监听已连接")
 
     async def on_error(self, event_method: str, *args, **kwargs):
-        _listener_status(False, f"QQ 事件处理失败：{event_method}")
+        logger.error("QQ event handler failed: %s\n%s", event_method, traceback.format_exc())
+        # botpy isolates event callbacks in their own tasks. A failed command
+        # does not mean that the gateway listener has disconnected.
+        _listener_status(True, f"QQ 单次事件处理失败：{event_method}；监听仍在继续")
 
     def _accept_message(self, message_id: str, scope: str) -> bool:
         now = time.monotonic()
@@ -62,23 +69,71 @@ class UrsuleQQClient(botpy.Client):
         self._last_request[scope] = now
         return True
 
-    async def _dispatch(self, content: str, message_id: str, scope: str, allow_sync: bool) -> str | None:
+    async def _dispatch(self, content: str, message_id: str, scope: str) -> BotReply | None:
         command = parse_command(content)
         if command is None or not self._accept_message(message_id, scope):
             return None
-        if command == "同步" and allow_sync:
-            now = time.monotonic()
-            if now - self._sync_last_at < SYNC_COOLDOWN_SECONDS:
-                remaining = int(SYNC_COOLDOWN_SECONDS - (now - self._sync_last_at))
-                return f"同步冷却中，请在 {remaining} 秒后重试。"
-            self._sync_last_at = now
         try:
-            result = await asyncio.wait_for(execute_command(command, allow_sync=allow_sync), timeout=150)
-            return result.truncated_text(MAX_REPLY_LENGTH)
+            result = await asyncio.wait_for(execute_command(command), timeout=150)
+            return BotReply(result.truncated_text(MAX_REPLY_LENGTH), image=result.image, image_alt=result.image_alt)
         except asyncio.TimeoutError:
-            return "命令执行超时，请稍后重试。"
-        except Exception:
-            return "命令执行失败，详细原因已记录在服务端；敏感信息不会通过 QQ 返回。"
+            return BotReply("命令执行超时，请稍后重试。")
+        except Exception as exc:
+            logger.exception("QQ command execution failed: %s", command.partition(" ")[0])
+            _listener_status(True, f"QQ 指令执行失败：{type(exc).__name__}；监听仍在继续")
+            try:
+                from ...integrations.kokomi import KokomiCommandError
+
+                if isinstance(exc, KokomiCommandError):
+                    return BotReply(str(exc))
+            except ImportError:
+                pass
+            return BotReply("命令执行失败，请稍后重试；机器人仍会继续监听后续指令。")
+
+    @staticmethod
+    async def _upload_image(message: C2CMessage | GroupMessage, target_id: str, image: bytes, *, group: bool):
+        """Upload image bytes through QQ's rich-media endpoint.
+
+        qq-botpy 1.2.1 only exposes URL uploads, while the API also accepts
+        base64 file_data. Use the SDK transport so authentication and routing
+        remain owned by the connected client.
+        """
+        route_path = "/v2/groups/{target_id}/files" if group else "/v2/users/{target_id}/files"
+        route = Route("POST", route_path, target_id=target_id)
+        payload = {
+            "file_type": 1,
+            "file_data": base64.b64encode(image).decode("ascii"),
+            "srv_send_msg": False,
+        }
+        return await message._api._http.request(route, json=payload)
+
+    async def _send_reply(
+        self,
+        message: C2CMessage | GroupMessage,
+        response: BotReply,
+        target_id: str,
+        *,
+        group: bool,
+    ) -> None:
+        try:
+            if response.image:
+                media = await self._upload_image(message, target_id, response.image, group=group)
+                await message.reply(msg_type=7, content=response.text, media=media)
+            else:
+                await message.reply(msg_type=0, content=response.text)
+        except Exception as exc:
+            logger.exception("QQ reply failed; listener remains active")
+            _listener_status(True, f"QQ 回复发送失败：{type(exc).__name__}；监听仍在继续")
+            if not response.image:
+                return
+            try:
+                await message.reply(
+                    msg_type=0,
+                    msg_seq=2,
+                    content="查询已完成，但结果图片发送失败，请稍后重试；机器人仍在继续监听。",
+                )
+            except Exception:
+                logger.exception("QQ fallback error reply also failed")
 
     async def on_c2c_message_create(self, message: C2CMessage):
         with SessionLocal() as db:
@@ -86,9 +141,9 @@ class UrsuleQQClient(botpy.Client):
         user_openid = message.author.user_openid or ""
         if not allowed_user or user_openid != allowed_user:
             return
-        response = await self._dispatch(message.content, message.id, f"user:{user_openid}", allow_sync=True)
+        response = await self._dispatch(message.content, message.id, f"user:{user_openid}")
         if response:
-            await message.reply(msg_type=0, content=response)
+            await self._send_reply(message, response, user_openid, group=False)
 
     async def on_group_at_message_create(self, message: GroupMessage):
         with SessionLocal() as db:
@@ -96,9 +151,9 @@ class UrsuleQQClient(botpy.Client):
         group_openid = message.group_openid or ""
         if not allowed_group or group_openid != allowed_group:
             return
-        response = await self._dispatch(message.content, message.id, f"group:{group_openid}", allow_sync=False)
+        response = await self._dispatch(message.content, message.id, f"group:{group_openid}")
         if response:
-            await message.reply(msg_type=0, content=response)
+            await self._send_reply(message, response, group_openid, group=True)
 
 
 def configured_credentials() -> tuple[str, str] | None:

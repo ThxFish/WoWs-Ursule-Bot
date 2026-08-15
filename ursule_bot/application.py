@@ -8,6 +8,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
+from . import __version__
 from .core.database import SessionLocal
 from .core.security import read_session
 from .core.settings import has_setup
@@ -35,7 +36,7 @@ async def lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Ursule Bot", version="0.2.0", lifespan=lifespan)
+    app = FastAPI(title="Ursule Bot", version=__version__, lifespan=lifespan)
     root = Path(__file__).parent
     app.mount("/static", StaticFiles(directory=str(root / "static")), name="static")
 

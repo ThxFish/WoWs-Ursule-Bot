@@ -2,16 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime
-from zoneinfo import ZoneInfo
-
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ...core.config import config
 from ...core.settings import get_setting
 from ...core.system_models import DataSourceStatus
 from ...integrations.collectors import collect_armory, collect_third_party, collect_wargaming, third_party_totals
+from .activity_day import activity_date
 from .line_state import update_line_state
 from .models import DailySnapshot, ResetPlan, utcnow
 
@@ -27,7 +24,7 @@ def _status(db: Session, name: str, ok: bool, message: str) -> None:
 
 
 async def sync_all(db: Session, capture_type: str = "manual") -> DailySnapshot:
-    snapshot = DailySnapshot(snapshot_date=datetime.now(ZoneInfo(config.timezone)).date(), capture_type=capture_type)
+    snapshot = DailySnapshot(snapshot_date=activity_date(), capture_type=capture_type)
     statuses: dict[str, dict] = {}
     try:
         armory = await collect_armory()

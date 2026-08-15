@@ -26,6 +26,41 @@ def line_progress_xp(completed_cycles: int, current_ship_index: int, waiting_for
     return progress + sum(ship["xp_to_next"] for ship in BRITISH_LIGHT_CRUISER_LINE[:index])
 
 
+def current_regrind_checkpoint(
+    baseline: list[dict],
+    completed_cycles: int,
+    current_ship_index: int,
+    waiting_for_reset: bool,
+    today: date,
+) -> dict | None:
+    """Return the frozen plan date for the player's current regrind stage."""
+    cycle = max(0, completed_cycles) + 1
+    ship_index = 0 if waiting_for_reset else min(max(0, current_ship_index), len(BRITISH_LIGHT_CRUISER_LINE) - 1)
+    checkpoint = next(
+        (
+            item
+            for item in baseline
+            if item.get("cycle") == cycle and item.get("ship_index") == ship_index
+        ),
+        None,
+    )
+    if checkpoint is None:
+        stage_floor = max(0, completed_cycles) * LINE_XP_PER_RESET + sum(
+            ship["xp_to_next"] for ship in BRITISH_LIGHT_CRUISER_LINE[:ship_index]
+        )
+        planned_row = next((item for item in baseline if item.get("target_xp", 0) >= stage_floor), None)
+        if planned_row is None:
+            return None
+        checkpoint = {
+            **planned_row,
+            "cycle": cycle,
+            "ship": BRITISH_LIGHT_CRUISER_LINE[ship_index]["name"],
+            "ship_index": ship_index,
+        }
+    planned_date = date.fromisoformat(str(checkpoint["date"]))
+    return {**checkpoint, "status": "领先" if today <= planned_date else "落后"}
+
+
 def build_regrind_baseline(start: date, deadline: date, resets: int) -> list[dict]:
     if deadline < start or resets <= 0:
         return []

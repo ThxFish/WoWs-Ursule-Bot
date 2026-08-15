@@ -13,7 +13,7 @@ from ...core.config import config
 from ...core.settings import get_setting
 from ...core.system_models import DataSourceStatus
 from .models import DailySnapshot, ManualOverride, ResourceForecast, ResetPlan, RewardGoal
-from .regrind import BRITISH_LIGHT_CRUISER_LINE, LINE_XP_PER_RESET, line_progress_xp, reset_count
+from .regrind import BRITISH_LIGHT_CRUISER_LINE, LINE_XP_PER_RESET, current_regrind_checkpoint, line_progress_xp, reset_count
 from .resources import EVENT_DEADLINE, recurring_occurrences, token_plan
 
 
@@ -63,7 +63,21 @@ def get_activity_overview(db: Session) -> ActivityOverview:
                 status = "超前"
             reached = [item for item in baseline if item["target_xp"] <= actual_xp]
             expected_date = date.fromisoformat(reached[-1]["date"] if reached else baseline[0]["date"])
-            milestone = {"status": status, "target": target, "delta_days": (expected_date - today).days, "actual_xp_floor": actual_xp, "actual_ship": "等待重置" if plan.waiting_for_reset else BRITISH_LIGHT_CRUISER_LINE[plan.current_ship_index]["name"]}
+            checkpoint = current_regrind_checkpoint(
+                baseline,
+                plan.completed_cycles,
+                plan.current_ship_index,
+                plan.waiting_for_reset,
+                today,
+            )
+            milestone = {
+                "status": status,
+                "target": target,
+                "checkpoint": checkpoint,
+                "delta_days": (expected_date - today).days,
+                "actual_xp_floor": actual_xp,
+                "actual_ship": "等待重置" if plan.waiting_for_reset else BRITISH_LIGHT_CRUISER_LINE[plan.current_ship_index]["name"],
+            }
         projection.update({"line_xp_per_reset": LINE_XP_PER_RESET, "line_total_xp": plan.target_resets * LINE_XP_PER_RESET, "line_daily_xp": baseline[0].get("daily_xp", 0) if baseline else 0})
     return ActivityOverview(goals, latest, json.loads(latest.boosters_json or "{}") if latest else {}, projection, plan, milestone, list(db.scalars(select(DataSourceStatus).order_by(DataSourceStatus.name))), overrides)
 

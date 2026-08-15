@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import date, datetime
-from zoneinfo import ZoneInfo
+from datetime import date
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlalchemy import select
 
+from ..centers.planning.activity_day import activity_date
 from ..centers.planning.models import DailySnapshot, ResetPlan, utcnow
 from ..centers.planning.overview import get_activity_overview, report_text
 from ..centers.planning.regrind import BRITISH_LIGHT_CRUISER_LINE, build_regrind_baseline, reset_count
@@ -20,7 +20,7 @@ from ..integrations.notifications import notify_with_fallback
 from .backup import create_backup, prune_automatic_backups
 
 
-scheduler = AsyncIOScheduler(timezone="Asia/Shanghai")
+scheduler = AsyncIOScheduler(timezone=config.timezone)
 
 
 async def scheduled_sync() -> None:
@@ -70,7 +70,16 @@ def initialize_database_and_plans() -> None:
 
 def start_scheduler() -> None:
     if not scheduler.running:
-        scheduler.add_job(scheduled_sync, "cron", hour=4, minute=0, id="daily-sync", replace_existing=True, coalesce=True, max_instances=1)
+        scheduler.add_job(
+            scheduled_sync,
+            "cron",
+            hour=config.sync_hour,
+            minute=config.sync_minute,
+            id="daily-sync",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
         scheduler.add_job(scheduled_report, "cron", hour=10, minute=0, id="daily-report", replace_existing=True, coalesce=True, max_instances=1)
         scheduler.start()
 
@@ -79,7 +88,7 @@ def schedule_startup_sync() -> None:
     with SessionLocal() as db:
         if not has_setup(db):
             return
-        today = datetime.now(ZoneInfo(config.timezone)).date()
+        today = activity_date()
         exists = db.scalar(select(DailySnapshot).where(DailySnapshot.snapshot_date == today, DailySnapshot.capture_type == "scheduled"))
         if not exists:
             asyncio.create_task(scheduled_sync())

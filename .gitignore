@@ -4,8 +4,9 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .playwright/
+tmp/
+*.log
 data/
 dist/
 build/
 *.egg-info/
-

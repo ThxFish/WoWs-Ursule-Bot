@@ -1,4 +1,4 @@
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import create_engine, inspect, select, text
 from sqlalchemy.orm import Session
@@ -7,7 +7,32 @@ from ursule_bot.core import database as db_module
 from ursule_bot.centers.planning import sync_service as service
 from ursule_bot.integrations.collectors import ArmoryData
 from ursule_bot.core.database import Base
+from ursule_bot.centers.planning.activity_day import activity_date
 from ursule_bot.centers.planning.models import DailySnapshot
+from ursule_bot.centers.planning.overview import get_activity_overview
+
+
+def test_activity_date_changes_at_four_am():
+    assert activity_date(datetime(2026, 8, 15, 3, 59, 59)) == date(2026, 8, 14)
+    assert activity_date(datetime(2026, 8, 15, 4, 0, 0)) == date(2026, 8, 15)
+
+
+def test_overview_reads_latest_existing_snapshot():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    collected_at = datetime(2026, 8, 15, 4, tzinfo=timezone.utc)
+
+    with Session(engine) as session:
+        session.add_all([
+            DailySnapshot(snapshot_date=date(2026, 8, 15), holiday_tokens=100, collected_at=collected_at),
+            DailySnapshot(snapshot_date=date(2026, 8, 15), holiday_tokens=250, collected_at=collected_at + timedelta(hours=2)),
+        ])
+        session.commit()
+
+        overview = get_activity_overview(session)
+
+    assert overview.latest is not None
+    assert overview.latest.holiday_tokens == 250
 
 
 async def test_each_sync_creates_an_independent_snapshot(monkeypatch):

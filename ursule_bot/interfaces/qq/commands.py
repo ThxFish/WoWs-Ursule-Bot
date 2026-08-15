@@ -1,22 +1,49 @@
 from __future__ import annotations
 
-import json
 import re
-from datetime import date
+from datetime import timezone
+from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
-
-from ...centers.planning.models import ResetPlan
 from ...centers.planning.overview import get_activity_overview
-from ...centers.planning.regrind import BRITISH_LIGHT_CRUISER_LINE, line_progress_xp
-from ...centers.planning.sync_service import guarded_sync
+from ...core.config import config
 from ...core.database import SessionLocal
 from .types import BotReply
 
 
-PREFIX = "/节日船团"
-COMMANDS = {"进度", "资源", "爬线", "同步", "帮助"}
-COMMAND_PATTERN = re.compile(r"^/节日船团(?:\s+([^\s]+))?\s*$")
+SIMPLE_ALIASES = {
+    "/帮助": "帮助",
+    "/help": "帮助",
+    "/活动": "活动",
+    "/event": "活动",
+    "/新闻": "资讯",
+    "/news": "资讯",
+    "/我": "战绩",
+    "/me": "战绩",
+    "/日报": "日报",
+    "/daily": "日报",
+}
+ARGUMENT_ALIASES = {
+    "/绑定": "绑定",
+    "/bind": "绑定",
+    "/近期": "近期",
+    "/recent": "近期",
+    "/随机": "随机",
+    "/random": "随机",
+    "/排位": "排位",
+    "/rank": "排位",
+    "/单船": "单船",
+    "/ship": "单船",
+    "/类别": "类别",
+    "/category": "类别",
+}
+USAGE = {
+    "绑定": "/绑定 eu 游戏昵称 或 /bind eu 游戏昵称",
+    "近期": "/近期 参数 或 /recent 参数",
+    "随机": "/随机 参数 或 /random 参数",
+    "排位": "/排位 参数 或 /rank 参数",
+    "单船": "/单船 船名 或 /ship 船名",
+    "类别": "/类别 参数 或 /category 参数",
+}
 
 
 def parse_command(content: str) -> str | None:
@@ -24,116 +51,229 @@ def parse_command(content: str) -> str | None:
         return None
     normalized = content.strip()
     normalized = re.sub(r"^<@!?[^>]+>\s*", "", normalized)
-    match = COMMAND_PATTERN.fullmatch(normalized)
-    if not match:
-        return "未知" if normalized.startswith(PREFIX) else None
-    return match.group(1) or "帮助"
+    normalized = re.sub(r"\s+", " ", normalized)
+    original_bind = re.fullmatch(r"/?wws\s+(?:bind|set|绑定)(?:\s+(.+))?", normalized, re.IGNORECASE)
+    if original_bind:
+        argument = original_bind.group(1)
+        return f"绑定 {argument}" if argument else "绑定"
+    lookup = normalized.lower()
+    simple = SIMPLE_ALIASES.get(lookup) or SIMPLE_ALIASES.get(f"/{lookup}")
+    if simple:
+        return simple
+    head, separator, argument = normalized.partition(" ")
+    head_lookup = head.lower()
+    parameterized = ARGUMENT_ALIASES.get(head_lookup) or ARGUMENT_ALIASES.get(f"/{head_lookup}")
+    if parameterized:
+        return f"{parameterized} {argument}" if separator and argument else parameterized
+    return None
 
 
 def help_text() -> str:
     return (
-        "节日船团机器人命令\n"
-        "/节日船团 进度 — 当日代币、总目标和缺口\n"
-        "/节日船团 资源 — 煤炭、钢铁、研发点和蓝色加成卡\n"
-        "/节日船团 爬线 — 当前舰船、完成轮数和下一目标日期\n"
-        "/节日船团 同步 — 立即采集（仅授权好友私聊）\n"
-        "/节日船团 帮助 — 显示本说明"
+        "Ursule Bot 指令（/ 可省略）\n"
+        "/帮助 /help — 显示本说明\n"
+        "/活动 /event — 当前活动状态图\n"
+        "/新闻 /news — 最近一周新闻图\n"
+        "/我 /me — 个人战绩图\n"
+        "/近期 /recent 参数 — 近期战绩\n"
+        "/绑定 /bind eu 游戏昵称 — 绑定兼容战绩账号\n"
+        "/随机 /random 参数 — 近期随机战绩\n"
+        "/排位 /rank 参数 — 近期排位战绩\n"
+        "/单船 /ship 船名 — 单船数据\n"
+        "/类别 /category 参数 — 筛选舰船数据\n"
+        "/日报 /daily — 生成日报图片"
     )
 
 
-def _progress_text() -> str:
+def build_kokomi_message(command: str, account_id: str) -> str:
+    """Translate a short command to the arguments following the /wws prefix."""
+    name, _, argument = command.partition(" ")
+    if name == "绑定":
+        if not argument:
+            raise ValueError(USAGE["绑定"])
+        return f"bind {argument}"
+    if not argument:
+        raise ValueError(USAGE.get(name, "指令缺少参数"))
+    target = "me"
+    if name == "近期":
+        return f"{target} recent {argument}"
+    if name == "随机":
+        return f"{target} pvp recent {argument}"
+    if name == "排位":
+        return f"{target} rank recent {argument}"
+    if name == "单船":
+        return f"{target} ship {argument}"
+    if name == "类别":
+        return f"{target} ships {argument}"
+    raise ValueError("不支持的战绩兼容指令")
+
+
+async def _kokomi_reply(command: str) -> BotReply:
+    from ...integrations.kokomi import execute_kokomi_message
+
+    name, _, argument = command.partition(" ")
+    if name in USAGE and not argument:
+        return BotReply(f"缺少必要参数。\n用法：{USAGE[name]}")
     with SessionLocal() as db:
-        ctx = get_activity_overview(db)
-        latest = ctx.latest
-        projection = ctx.projection
-        return (
-            "节日船团进度\n"
-            f"数据日期：{latest.snapshot_date if latest else '尚无'}\n"
-            f"当前代币：{latest.holiday_tokens if latest and latest.holiday_tokens is not None else '未知'}\n"
-            f"奖励总目标：{projection['goal_tokens']}\n"
-            f"兑换后预计：{projection['projected_tokens']}\n"
-            f"当前缺口：{projection['gap_tokens']}\n"
-            f"额外所需研发点：{projection['additional_research_points']}"
+        from ...core.settings import get_setting
+
+        account_id = get_setting(db, "account_id")
+        api_url = get_setting(db, "kokomi_api_url")
+        api_token = get_setting(db, "kokomi_api_token")
+    if not account_id:
+        return BotReply("请先在设置页配置欧服 Account ID。")
+    message = build_kokomi_message(command, account_id)
+    text, image = await execute_kokomi_message(
+        message,
+        user_id=account_id,
+        channel_id=account_id,
+        **({"api_url": api_url} if api_url else {}),
+        **({"token": api_token} if api_token else {}),
+    )
+    return BotReply(text, image=image, image_alt="战舰世界战绩查询结果" if image else None)
+
+
+def _metric_number(value: str, *, decimal: bool = False) -> float | int:
+    cleaned = value.replace("%", "").replace(" ", "")
+    if cleaned in {"", "-"}:
+        return 0.0 if decimal else 0
+    return float(cleaned) if decimal else int(round(float(cleaned)))
+
+
+async def _daily_reply() -> BotReply:
+    from ...centers.information.service import get_recent_news
+    from ...centers.planning.activity_day import activity_date
+    from ...centers.stats.service import get_daily_metric, get_personal_stats
+    from ...integrations.news import NewsCollectionError
+    from ...rendering.daily import DailyPerformance, DailyReport, render_daily_report
+    from ...rendering.information import NewsItem
+
+    with SessionLocal() as db:
+        overview = get_activity_overview(db)
+        stats = await get_personal_stats(db)
+    try:
+        articles = await get_recent_news()
+    except NewsCollectionError:
+        # News is supplementary: an upstream outage must not suppress the
+        # activity and account sections of the daily report.
+        articles = []
+    latest = overview.latest
+    projection = overview.projection
+    plan = overview.plan
+    milestone = overview.milestone or {}
+    target = milestone.get("target") or {}
+    checkpoint = milestone.get("checkpoint") or {}
+    metric = get_daily_metric(stats.account_id)
+    performance = DailyPerformance()
+    if metric is not None:
+        performance = DailyPerformance(
+            battles=_metric_number(metric.battles_count),
+            win_rate=_metric_number(metric.win_rate, decimal=True),
+            personal_rating=_metric_number(metric.rating),
+            average_damage=_metric_number(metric.avg_damage),
+            average_frags=_metric_number(metric.avg_frags, decimal=True),
+            average_xp=_metric_number(metric.avg_exp),
         )
-
-
-def _resources_text() -> str:
-    with SessionLocal() as db:
-        ctx = get_activity_overview(db)
-        latest = ctx.latest
-        if not latest:
-            return "尚无资源快照，请先执行同步。"
-        boosters = ctx.boosters
-        return (
-            f"账号资源（{latest.snapshot_date}）\n"
-            f"煤炭：{latest.coal if latest.coal is not None else '未知'}\n"
-            f"钢铁：{latest.steel if latest.steel is not None else '未知'}\n"
-            f"研发点：{latest.research_points if latest.research_points is not None else '未知'}\n"
-            "蓝色加成卡：\n"
-            f"银币 +160%：{boosters.get('rare_credits', '未知')}\n"
-            f"战舰经验 +800%：{boosters.get('rare_ship_xp', '未知')}\n"
-            f"指挥官经验 +800%：{boosters.get('rare_commander_xp', '未知')}\n"
-            f"全局经验 +2400%：{boosters.get('rare_free_xp', '未知')}"
+    resources = {
+        key: getattr(latest, key, None) if latest else None
+        for key in ("holiday_tokens", "coal", "steel", "research_points", "free_xp", "credits")
+    }
+    resources["holiday_tokens"] = int(projection.get("current_tokens", resources["holiday_tokens"] or 0))
+    goals = "、".join(f"{goal.name} × {goal.quantity}" for goal in overview.goals[:2]) or "尚未配置活动目标"
+    news = tuple(
+        NewsItem(
+            title=article.title,
+            source=article.source,
+            published_at=article.published_at,
+            description=article.description,
+            tags=article.tags,
+            tag_color=article.tag_color,
+            url=article.url,
+            thumbnail=article.thumbnail,
         )
+        for article in articles[:2]
+    )
+    report = DailyReport(
+        report_date=activity_date(),
+        nickname=stats.nickname,
+        account_id=stats.account_id,
+        region=stats.region,
+        snapshot_date=(
+            (latest.collected_at.replace(tzinfo=timezone.utc) if latest.collected_at.tzinfo is None else latest.collected_at)
+            .astimezone(ZoneInfo(config.timezone))
+            .strftime("%Y-%m-%d %H:%M")
+            if latest else "尚无快照"
+        ),
+        resources=resources,
+        goal_name=goals,
+        goal_amount=int(projection.get("goal_tokens", 0)),
+        goal_gap=int(projection.get("gap_tokens", 0)),
+        line_name=plan.line_name if plan else "尚未配置研发线",
+        current_ship=str(milestone.get("actual_ship", "—")),
+        next_checkpoint=str(checkpoint.get("ship", target.get("ship", "—"))),
+        checkpoint_cycle=int(checkpoint.get("cycle", 0)),
+        checkpoint_date=str(checkpoint.get("date", target.get("date", "待定"))),
+        checkpoint_status=str(checkpoint.get("status", milestone.get("status", "未配置"))),
+        line_xp=int(milestone.get("actual_xp_floor", 0)),
+        checkpoint_xp=int(target.get("target_xp", 0)),
+        performance=performance,
+        news=news,
+    )
+    return BotReply(
+        f"{stats.nickname} · {activity_date()} 日报",
+        image=render_daily_report(report),
+        image_alt="战舰世界活动、昨日战绩与新闻日报",
+    )
 
 
-def _line_text() -> str:
-    with SessionLocal() as db:
-        plan = db.scalar(select(ResetPlan).where(ResetPlan.active.is_(True)).order_by(ResetPlan.id.desc()).limit(1))
-        if not plan:
-            return "尚未生成重爬计划。"
-        actual_ship = "等待首次重置" if plan.waiting_for_reset else BRITISH_LIGHT_CRUISER_LINE[plan.current_ship_index]["name"]
-        actual_xp = line_progress_xp(plan.completed_cycles, plan.current_ship_index, plan.waiting_for_reset)
-        baseline = json.loads(plan.baseline_json or "[]")
-        next_target = None
-        seen = set()
-        for item in baseline:
-            key = (item.get("cycle"), item.get("ship"))
-            if key in seen:
-                continue
-            seen.add(key)
-            if item.get("target_xp", 0) > actual_xp:
-                next_target = item
-                break
-        return (
-            "英国轻巡重爬\n"
-            f"当前状态：{actual_ship}\n"
-            f"已完成轮数：{plan.completed_cycles} / {plan.target_resets}\n"
-            f"下一目标：{next_target.get('ship') if next_target else '计划已完成'}\n"
-            f"目标日期：{next_target.get('date') if next_target else plan.deadline}"
+async def execute_command(command: str) -> BotReply:
+    command_name = command.partition(" ")[0]
+    if command_name in {"绑定", "近期", "随机", "排位", "单船", "类别"}:
+        return await _kokomi_reply(command)
+    if command == "活动":
+        from ...rendering.activity import render_activity_overview
+
+        with SessionLocal() as db:
+            overview = get_activity_overview(db)
+        return BotReply(
+            "当前活动状态",
+            image=render_activity_overview(overview),
+            image_alt="节日船团活动状态图",
         )
-
-
-def _safe_error(value: object) -> str:
-    text = str(value).replace("\n", " ")[:240]
-    text = re.sub(r"(?i)(access_token|clientSecret|password|cookie)[=: ]+[^ &,;]+", r"\1=[已隐藏]", text)
-    return text
-
-
-async def _sync_text() -> str:
-    with SessionLocal() as db:
-        snapshot = await guarded_sync(db, capture_type="qq")
-        statuses = json.loads(snapshot.source_status_json or "{}")
-        succeeded = [name for name, status in statuses.items() if status.get("ok")]
-        failed = [f"{name}: {_safe_error(status.get('error', '失败'))}" for name, status in statuses.items() if not status.get("ok")]
-        lines = [f"同步完成：{snapshot.snapshot_date}", f"成功数据源：{', '.join(succeeded) if succeeded else '无'}"]
-        if failed:
-            lines.append("失败数据源：" + "；".join(failed))
-        lines.append(_progress_text())
-        return "\n".join(lines)
-
-
-async def execute_command(command: str, allow_sync: bool) -> BotReply:
+    if command == "战绩":
+        from ...centers.stats.service import get_personal_stats
+        from ...rendering.kokomi import render_personal_stats
+        with SessionLocal() as db:
+            stats = await get_personal_stats(db)
+        return BotReply(
+            f"{stats.nickname} 的个人战绩",
+            image=render_personal_stats(stats),
+            image_alt="Kokomi 风格个人战绩卡",
+        )
+    if command == "资讯":
+        from ...centers.information.service import get_recent_news
+        from ...rendering.information import NewsItem, render_information_report
+        articles = await get_recent_news()
+        items = [
+            NewsItem(
+                title=article.title,
+                source=article.source,
+                published_at=article.published_at,
+                description=article.description,
+                tags=article.tags,
+                tag_color=article.tag_color,
+                url=article.url,
+                thumbnail=article.thumbnail,
+            )
+            for article in articles
+        ]
+        return BotReply(
+            f"最近一周新闻 · {len(items)} 条",
+            image=render_information_report(items),
+            image_alt="战舰世界官网与开发者博客新闻列表",
+        )
     if command == "帮助":
         return BotReply(help_text())
-    if command == "进度":
-        return BotReply(_progress_text())
-    if command == "资源":
-        return BotReply(_resources_text())
-    if command == "爬线":
-        return BotReply(_line_text())
-    if command == "同步":
-        if not allow_sync:
-            return BotReply("为保护账户，群聊不允许执行同步；请使用已授权好友私聊机器人。")
-        return BotReply(await _sync_text())
+    if command == "日报":
+        return await _daily_reply()
     return BotReply("命令格式不正确。\n" + help_text())

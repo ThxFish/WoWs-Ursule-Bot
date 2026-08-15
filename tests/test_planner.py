@@ -1,7 +1,7 @@
 from datetime import date
 
 from ursule_bot.centers.planning.line_state import update_line_state
-from ursule_bot.centers.planning.regrind import LINE_XP_PER_RESET, build_regrind_baseline, reset_count
+from ursule_bot.centers.planning.regrind import LINE_XP_PER_RESET, build_regrind_baseline, current_regrind_checkpoint, reset_count
 from ursule_bot.centers.planning.resources import exchange_tokens, recurring_occurrences, token_plan
 from ursule_bot.centers.planning.timeline import ShipStep, build_baseline, milestone_status
 
@@ -56,6 +56,17 @@ def test_fixed_line_xp_and_even_daily_baseline():
     assert baseline[0]["daily_xp"] == 344_750
     assert baseline[-1]["target_xp"] == 1_379_000
     assert baseline[-1]["ship"] == "米诺陶可研发并重置"
+
+
+def test_current_regrind_checkpoint_keeps_frozen_stage_date_when_late():
+    baseline = build_regrind_baseline(date(2026, 8, 14), date(2026, 8, 20), 1)
+    checkpoint = current_regrind_checkpoint(baseline, 0, 4, True, date(2026, 8, 16))
+
+    assert checkpoint is not None
+    assert checkpoint["cycle"] == 1
+    assert checkpoint["ship"] == "利安得"
+    assert checkpoint["date"] == "2026-08-14"
+    assert checkpoint["status"] == "落后"
 
 
 def test_port_transitions_advance_ship_and_finish_cycle():

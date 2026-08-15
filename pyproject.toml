@@ -16,6 +16,7 @@ dependencies = [
   "httpx==0.28.1",
   "itsdangerous==2.2.0",
   "jinja2==3.1.6",
+  "pillow==11.3.0",
   "playwright==1.54.0",
   "python-multipart==0.0.20",
   "qq-botpy==1.2.1",
@@ -28,6 +29,14 @@ test = ["pytest==8.4.1", "pytest-asyncio==1.1.0"]
 
 [tool.setuptools.packages.find]
 include = ["ursule_bot*"]
+
+[tool.setuptools.package-data]
+ursule_bot = [
+  "rendering/*.md",
+  "rendering/assets/kokomi/**/*",
+  "static/**/*",
+  "templates/**/*.html",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
