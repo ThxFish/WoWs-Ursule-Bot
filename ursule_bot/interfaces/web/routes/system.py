@@ -27,12 +27,11 @@ router = APIRouter()
 
 @router.get("/settings", response_class=HTMLResponse)
 def settings_page(request: Request, db: Session = Depends(get_db)):
-    keys = ["account_id", "committed_coal", "committed_steel", "committed_research_points", "daily_token_target", "qq_app_id", "qq_user_openid", "qq_group_openid", "qq_message_template", "qq_daily_target", "qq_target_id", "qq_target_type", "smtp_host", "smtp_port", "smtp_security", "smtp_username", "smtp_recipient"]
+    keys = ["account_id", "committed_coal", "committed_steel", "committed_research_points", "daily_token_target", "qq_app_id", "qq_user_openid", "qq_group_openid", "qq_message_template", "qq_target_id", "qq_target_type", "smtp_host", "smtp_port", "smtp_security", "smtp_username", "smtp_recipient"]
     values = {key: get_setting(db, key) for key in keys}
     if not values["qq_user_openid"] and not values["qq_group_openid"] and values["qq_target_id"]:
         values["qq_group_openid" if values["qq_target_type"] == "group" else "qq_user_openid"] = values["qq_target_id"]
     values["qq_message_template"] = values["qq_message_template"] or DEFAULT_QQ_MESSAGE_TEMPLATE
-    values["qq_daily_target"] = values["qq_daily_target"] or values["qq_target_type"] or "user"
     backups = [{"name": path.name, "size": path.stat().st_size, "modified": datetime.fromtimestamp(path.stat().st_mtime, ZoneInfo(config.timezone))} for path in list_backups(limit=10)]
     return templates.TemplateResponse("settings.html", page_context(
         request,
@@ -51,15 +50,13 @@ async def save_settings(request: Request, db: Session = Depends(get_db)):
     form = await request.form()
     require_csrf(request, str(form.get("csrf", "")))
     secrets = {"wg_application_id", "qq_app_secret", "smtp_password"}
-    allowed = {"account_id", "wg_application_id", "committed_coal", "committed_steel", "committed_research_points", "daily_token_target", "qq_app_id", "qq_app_secret", "qq_user_openid", "qq_group_openid", "qq_message_template", "qq_daily_target", "smtp_host", "smtp_port", "smtp_security", "smtp_username", "smtp_password", "smtp_recipient"}
+    allowed = {"account_id", "wg_application_id", "committed_coal", "committed_steel", "committed_research_points", "daily_token_target", "qq_app_id", "qq_app_secret", "qq_user_openid", "qq_group_openid", "qq_message_template", "smtp_host", "smtp_port", "smtp_security", "smtp_username", "smtp_password", "smtp_recipient"}
     clearable = {"qq_user_openid", "qq_group_openid", "qq_message_template"}
     if "qq_message_template" in form:
         try:
             render_message_template(str(form["qq_message_template"]), "测试标题", "测试日报")
         except RuntimeError as exc:
             raise HTTPException(400, str(exc)) from exc
-    if "qq_daily_target" in form and str(form["qq_daily_target"]) not in {"user", "group", "both"}:
-        raise HTTPException(400, "未知 QQ 每日通知目标")
     if "smtp_security" in form and str(form["smtp_security"]) not in {"ssl", "starttls"}:
         raise HTTPException(400, "未知 SMTP 加密方式")
     for key in allowed:

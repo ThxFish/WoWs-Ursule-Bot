@@ -48,6 +48,9 @@ def test_updated_short_commands_and_arguments():
     assert parse_command("近期 7") == "近期 7"
     assert parse_command("bind eu PlayerName") == "绑定 eu PlayerName"
     assert parse_command("wws set eu PlayerName") == "绑定 eu PlayerName"
+    assert parse_command("同步") == "同步"
+    assert parse_command("/update") == "同步"
+    assert parse_command("update") == "同步"
 
 
 def test_short_commands_build_original_wws_arguments():
@@ -78,3 +81,18 @@ async def test_daily_command_returns_built_reply(monkeypatch):
     monkeypatch.setattr(commands, "_daily_reply", fake_daily_reply)
     response = await execute_command("日报")
     assert response.image == b"png"
+
+
+@pytest.mark.asyncio
+async def test_sync_command_returns_minimal_result(monkeypatch):
+    from ursule_bot.interfaces.qq import commands
+
+    async def fake_sync(_db, capture_type):
+        assert capture_type == "qq"
+        return type("Snapshot", (), {
+            "source_status_json": '{"armory":{"ok":true},"wargaming":{"ok":true,"port_available":true}}'
+        })()
+
+    monkeypatch.setattr(commands, "guarded_sync", fake_sync)
+    response = await execute_command("同步")
+    assert response.text == "同步成功"

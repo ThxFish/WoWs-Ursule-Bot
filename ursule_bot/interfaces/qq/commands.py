@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import re
 from datetime import timezone
 from zoneinfo import ZoneInfo
 
 from ...centers.planning.overview import get_activity_overview
+from ...centers.planning.sync_service import guarded_sync
 from ...core.config import config
 from ...core.database import SessionLocal
 from .types import BotReply
@@ -21,6 +23,8 @@ SIMPLE_ALIASES = {
     "/me": "战绩",
     "/日报": "日报",
     "/daily": "日报",
+    "/同步": "同步",
+    "/update": "同步",
 }
 ARGUMENT_ALIASES = {
     "/绑定": "绑定",
@@ -82,6 +86,7 @@ def help_text() -> str:
         "/单船 /ship 船名 — 单船数据\n"
         "/类别 /category 参数 — 筛选舰船数据\n"
         "/日报 /daily — 生成日报图片"
+        "\n/同步 /update — 更新全部数据"
     )
 
 
@@ -276,4 +281,14 @@ async def execute_command(command: str) -> BotReply:
         return BotReply(help_text())
     if command == "日报":
         return await _daily_reply()
+    if command == "同步":
+        try:
+            with SessionLocal() as db:
+                snapshot = await guarded_sync(db, capture_type="qq")
+            statuses = json.loads(snapshot.source_status_json or "{}")
+            complete = bool(statuses) and all(status.get("ok") for status in statuses.values())
+            complete = complete and statuses.get("wargaming", {}).get("port_available") is not False
+            return BotReply("同步成功" if complete else "同步失败")
+        except Exception:
+            return BotReply("同步失败")
     return BotReply("命令格式不正确。\n" + help_text())

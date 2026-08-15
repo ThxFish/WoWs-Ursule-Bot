@@ -15,6 +15,7 @@ from ...centers.planning.models import utcnow
 from ...core.database import SessionLocal
 from ...core.settings import get_setting
 from ...core.system_models import DataSourceStatus
+from ...integrations.notifications import parse_group_openids
 from .commands import execute_command, parse_command
 from .types import BotReply
 
@@ -147,9 +148,10 @@ class UrsuleQQClient(botpy.Client):
 
     async def on_group_at_message_create(self, message: GroupMessage):
         with SessionLocal() as db:
-            allowed_group = get_setting(db, "qq_group_openid") or (get_setting(db, "qq_target_id") if get_setting(db, "qq_target_type", "user") == "group" else "")
+            configured_groups = get_setting(db, "qq_group_openid") or (get_setting(db, "qq_target_id") if get_setting(db, "qq_target_type", "user") == "group" else "")
+            allowed_groups = set(parse_group_openids(configured_groups))
         group_openid = message.group_openid or ""
-        if not allowed_group or group_openid != allowed_group:
+        if group_openid not in allowed_groups:
             return
         response = await self._dispatch(message.content, message.id, f"group:{group_openid}")
         if response:

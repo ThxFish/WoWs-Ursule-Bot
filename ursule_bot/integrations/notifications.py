@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import smtplib
 from email.message import EmailMessage
 
@@ -10,6 +11,11 @@ from ..core.settings import get_setting
 
 DEFAULT_QQ_MESSAGE_TEMPLATE = "{report}"
 QQ_API_BASE = "https://api.bot.qq.com"
+
+
+def parse_group_openids(value: str) -> list[str]:
+    """Parse a multi-group setting while preserving order and removing duplicates."""
+    return list(dict.fromkeys(part for part in re.split(r"[\s,，;；]+", value.strip()) if part))
 
 
 def render_message_template(template: str, subject: str, report: str) -> str:
@@ -23,13 +29,24 @@ def render_message_template(template: str, subject: str, report: str) -> str:
     return rendered
 
 
-def qq_targets(user_openid: str, group_openid: str, target: str = "both") -> list[tuple[str, str]]:
+def qq_targets(user_openid: str, group_openids: str, target: str = "both") -> list[tuple[str, str]]:
     targets = []
     if target in {"user", "both"} and user_openid.strip():
         targets.append(("好友", f"/v2/users/{user_openid.strip()}/messages"))
-    if target in {"group", "both"} and group_openid.strip():
-        targets.append(("群", f"/v2/groups/{group_openid.strip()}/messages"))
+    groups = parse_group_openids(group_openids)
+    if target in {"group", "both"}:
+        for index, group_openid in enumerate(groups, start=1):
+            label = "群" if len(groups) == 1 else f"群 {index}"
+            targets.append((label, f"/v2/groups/{group_openid}/messages"))
     return targets
+
+
+def resolve_qq_target(target: str) -> str:
+    """Keep automatic reports private while allowing explicit channel tests."""
+    resolved = "user" if target == "scheduled" else target
+    if resolved not in {"user", "group", "both"}:
+        raise RuntimeError("未知 QQ 发送目标")
+    return resolved
 
 
 async def send_qq(db: Session, content: str, target: str = "scheduled") -> None:
@@ -43,10 +60,7 @@ async def send_qq(db: Session, content: str, target: str = "scheduled") -> None:
             group_openid = legacy_id
         else:
             user_openid = legacy_id
-    if target == "scheduled":
-        target = get_setting(db, "qq_daily_target", get_setting(db, "qq_target_type", "user"))
-    if target not in {"user", "group", "both"}:
-        raise RuntimeError("未知 QQ 发送目标")
+    target = resolve_qq_target(target)
     targets = qq_targets(user_openid, group_openid, target)
     if not app_id or not secret or not targets:
         label = {"user": "好友 User OpenID", "group": "群 Group OpenID", "both": "好友和群 OpenID"}[target]

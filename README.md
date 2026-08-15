@@ -67,14 +67,25 @@ Compose 默认只监听宿主机 `127.0.0.1:8000`，持久数据保存在 `./dat
 1. 填写欧服 `Account ID` 与 Wargaming `Application ID`；后者可从 Wargaming Developer Room 创建。
 2. 可选执行 Wargaming OAuth，以读取私有在港舰船列表。
 3. 在有图形桌面的 Windows 环境登录军械库；服务器部署可导入 Playwright `storage_state` 文件。
-4. 配置 QQ 官方机器人 `App ID`、`App Secret` 以及允许访问的好友或群 OpenID。
+4. 配置 QQ 官方机器人 `App ID`、`App Secret` 以及允许访问的好友或群 OpenID。群 Group OpenID 可配置多个，每行一个。
 5. 配置 SMTP 作为通知通道或 QQ 发送失败时的回退通道。
 
 敏感配置由本地 Fernet 密钥加密后保存在 SQLite 中，不需要写入 `.env`。修改 QQ App ID 或 App Secret 后需重启应用。
 
 ## QQ 指令
 
-机器人只响应设置页中列入白名单的好友或群。中文、英文指令等价。
+机器人只响应设置页中列入白名单的好友或群。多个群 Group OpenID 可以换行、逗号、分号或空格分隔；它们不是数字 QQ 群号。自动日报固定只发送给配置的好友 User OpenID，不会主动发送到群聊。中文、英文指令等价。
+
+获取 OpenID 时，先停止正在运行的机器人实例，然后在项目目录执行：
+
+```powershell
+$env:QQ_BOT_APP_ID = Read-Host "QQ Bot App ID"
+$qqSecret = Read-Host "QQ Bot App Secret" -AsSecureString
+$env:QQ_BOT_APP_SECRET = [System.Net.NetworkCredential]::new("", $qqSecret).Password
+.\.venv\Scripts\python.exe .\scripts\qq_get_openid.py
+```
+
+脚本连接成功后，在每个目标群中分别 `@机器人` 并发送任意文字；终端会打印对应的 `group_openid`。将所有值逐行复制到设置页的“群 Group OpenID”中，保存后重启正式应用。QQ 官方机器人接口使用此 OpenID，不使用群资料中显示的数字 QQ 群号。App Secret 属于敏感凭据，请勿复制到聊天、日志或提交到 Git。
 
 | 功能 | 指令 |
 | --- | --- |
